@@ -1,0 +1,11 @@
+# Central Finite Curve — runtime dependencies (Python 3.10+)
+meshtastic>=2.7           # GPL-3.0 — mesh radio API/protocol (drives the widget's license)
+tkintermapview>=1.30      # CC0 — map view
+Pillow>=10               # MIT — images, map tiles, flight snapshots
+requests>=2.31           # Apache-2.0 — meshmap.net + tile fetches
+sounddevice>=0.4         # MIT — cross-platform alert sound
+soundfile>=0.12          # BSD — read the alert .wav
+numpy>=1.24              # BSD — pulled in by sounddevice/soundfile
+pystray>=0.19            # LGPL-3.0 — system-tray icon
+pypubsub>=4.0            # BSD — event bus used by the Meshtastic API
+# Tkinter ships with Python (on macOS install the python.org build or `brew install python-tk`)
