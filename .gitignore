@@ -1,0 +1,33 @@
+# ---- personal / runtime data — NEVER commit (holds your location, node IDs, push topic) ----
+config.json
+messages.jsonl
+messages-backup.jsonl
+nodes-history.json
+mesh_widget.log
+run.log
+.logcheck
+private/
+flights/
+
+# demo runtime data (regenerated on --demo)
+demo/demo-config.json
+demo/demo-messages.jsonl
+demo/demo-history.json
+demo/demo.log
+
+# python / build
+__pycache__/
+*.pyc
+*.pyo
+build/
+dist/
+*.spec
+.venv/
+venv/
+env/
+*.corrupt-*
+tests/results.log
+
+# OS cruft
+.DS_Store
+Thumbs.db
