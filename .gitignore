@@ -31,3 +31,4 @@ tests/results.log
 # OS cruft
 .DS_Store
 Thumbs.db
+.github/workflows/
