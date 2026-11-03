@@ -32,3 +32,6 @@ tests/results.log
 .DS_Store
 Thumbs.db
 .github/workflows/
+
+# live screenshot — may contain real location/nodes
+docs/img/_live.png

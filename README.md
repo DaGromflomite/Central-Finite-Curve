@@ -10,6 +10,11 @@ drone's manufacturer looked up from its MAC address.
 
 > ⚠️ **ALPHA.** This is early software under active development. Expect rough edges, and please
 > report issues. It is **free, open-source (GPL-3.0)** community software — never for sale.
+>
+> 🪟 **Windows is the tested platform.** 🍎 **macOS is completely untested** — the code is
+> cross-platform and *should* run from source, but it has not been run on a Mac at all yet. The
+> macOS source is published purely as a **pre-alpha backup**; assume nothing works there until a
+> Mac build is validated. There is **no prebuilt macOS app** yet — Mac users must run from source.
 
 ---
 
@@ -68,8 +73,9 @@ pip install -r requirements.txt
 python mesh_widget.pyw
 ```
 
-Prebuilt packages (a Windows installer and a macOS app) are attached to each
-[Release](../../releases) once CI has built them — no Python needed to run those.
+A prebuilt **Windows installer** (and a portable Windows zip) is attached to each
+[Release](../../releases) — no Python needed to run it. **macOS has no prebuilt app yet**
+and must be run from source (and is untested — see the alpha note above).
 
 First run: open **Settings** (gear) to pick your radio's port and set your home location. The
 widget talks to the radio; your location and config stay on your PC and are never sent to the mesh.
@@ -111,4 +117,6 @@ author. See [LICENSE](LICENSE).
 - Two heavy GUI timing tests (`test_demo_session`, `test_busy_city_scale`) are currently flaky —
   being investigated; core functionality tests pass.
 - The map uses online tiles; mind the providers' terms, and your data plan on cellular.
-- Tray/sound behaviour varies a little by OS; macOS packaging is validated by beta testing.
+- Tray/sound behaviour varies a little by OS.
+- **macOS is entirely unvalidated** — it has not been launched on a Mac yet. Treat the macOS
+  source as a pre-alpha backup, not a working build.

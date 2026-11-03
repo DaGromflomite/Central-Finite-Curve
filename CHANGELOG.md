@@ -10,8 +10,11 @@ First public alpha by DaGromflomite.
   plus a PNG snapshot of the map.
 - **Search** — pings quiet nodes (and the drone detector) so they re-announce immediately.
 - Optional phone push via ntfy; messages with delivery reports; system-tray; single-instance.
-- **Cross-platform:** runs on Windows and macOS (guarded Windows-only APIs; OS-aware default sound).
+- **Windows:** tested platform; prebuilt installer + portable zip provided.
+- **macOS:** cross-platform code is in place (guarded Windows-only APIs; OS-aware default sound),
+  but it is **completely untested — never launched on a Mac**. Published as a pre-alpha source
+  backup only; no prebuilt macOS app yet.
 - GPL-3.0; bundled IEEE OUI table for offline manufacturer lookups.
 
-Known issues: two heavy GUI timing tests are flaky and under investigation; macOS packaging is
-validated by beta testing.
+Known issues: two heavy GUI timing tests are flaky and under investigation; macOS is untested and
+has no prebuilt app (source-only, pre-alpha backup).
