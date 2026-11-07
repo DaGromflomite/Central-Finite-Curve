@@ -58,13 +58,11 @@ flight path, alongside the pilot's location and the manufacturer resolved from t
   readout.
 - **Save flight** — export the current track to `flights/flight-<time>.csv` (time, drone GPS, RSSI,
   MAC, manufacturer and pilot GPS), together with a PNG snapshot of the map.
-- **Transient-node tracking** — the widget actively watches your local airspace for nodes passing
-  through. A background discovery runs on its own (default every 3 min; pick **Active**, **Real-time**,
-  or **Off** in Settings) and sends a **direct, 0-hop** node-info request, so a node in range — even a
-  silent one — is prompted to announce itself. Because it is 0-hop it only ever touches your local area
-  and is **never relayed into the wider mesh**, so it is safe to leave running. The **Search** button
-  does the same on demand, more thoroughly (it also nudges every known node and reaches a couple of
-  hops out).
+- **Spots nodes passing through** — every few minutes it checks for radios that have come into range
+  and nudges them to check in, so a node moving through the area shows up on its own, without anyone
+  clicking. It only reaches radios right next to you, not the wider mesh, so it never adds to everyone
+  else's traffic. Change how often it runs, or turn it off, in Settings. The **Search** button does a
+  bigger sweep whenever you want one.
 - **Messaging** — send and receive mesh text, with delivery reports.
 - **Phone push** (optional) — forward alerts to your phone through ntfy.
 - Runs minimised to the **system tray**, allows only a single instance, and recovers cleanly when a
