@@ -21,7 +21,9 @@ __pycache__/
 *.pyo
 build/
 dist/
+# (mesh_monitor.spec is un-ignored below — CI needs it to build)
 *.spec
+!mesh_monitor.spec
 .venv/
 venv/
 env/
@@ -31,7 +33,6 @@ tests/results.log
 # OS cruft
 .DS_Store
 Thumbs.db
-.github/workflows/
 
 # live screenshot — may contain real location/nodes
 docs/img/_live.png
