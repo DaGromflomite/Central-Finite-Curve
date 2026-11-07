@@ -69,7 +69,7 @@ def asset_path(name):
     """Path to a bundled asset (icons), working from source and from a PyInstaller build."""
     base = getattr(sys, "_MEIPASS", HERE)
     return os.path.join(base, "assets", name)
-VERSION = "0.1.0-alpha"
+VERSION = "0.2.0-alpha"
 HEALTH_SECS = 600   # how often a health line (memory, CPU, nodes) goes into the log
 DEMO = False        # --demo: made-up nodes instead of a radio, with its own files (see enable_demo)
 log = logging.getLogger("centralfinitecurve")
@@ -1714,7 +1714,7 @@ class App:
         if iface is not self.iface:
             return
         try:
-            from meshtastic import telemetry_pb2, portnums_pb2
+            from meshtastic import telemetry_pb2, portnums_pb2, mesh_pb2, BROADCAST_ADDR
             my_id = (iface.getMyNodeInfo() or {}).get("user", {}).get("id")
             nodes = dict(iface.nodes or {})
         except Exception:
@@ -1745,8 +1745,39 @@ class App:
                 log.info("Search: pinged %s (%s) on channel %d", name, nid, ch)
             except Exception as e:
                 warn_once("search", "Search ping to %s failed: %s", nid, e)
-        msg = ("Search: asked " + ", ".join(pinged) + " to check in; replies appear here and in Active."
-               if pinged else "Search: no radio-known nodes to search for yet.")
+        # Real search: also BROADCAST a node-info request on each channel we use,
+        # so nodes the radio doesn't already know announce themselves — a true
+        # discovery, not just re-pinging the hubs already in the node DB. Firmware
+        # replies to a NodeInfo request with its own NodeInfo, so any node in
+        # range (even one the hub has forgotten) checks back in.
+        try:
+            uu = (iface.getMyNodeInfo() or {}).get("user", {}) or {}
+            myuser = mesh_pb2.User(id=uu.get("id", ""),
+                                   long_name=uu.get("longName", ""),
+                                   short_name=uu.get("shortName", ""))
+        except Exception:
+            myuser = None
+        bcast = 0
+        for ch in sorted({0, dchan}):
+            try:
+                iface.sendData(myuser if myuser is not None else b"",
+                               destinationId=BROADCAST_ADDR,
+                               portNum=portnums_pb2.PortNum.NODEINFO_APP,
+                               wantResponse=True, channelIndex=ch, hopLimit=3)
+                bcast += 1
+                log.info("Search: broadcast node-info request on channel %d", ch)
+            except Exception as e:
+                warn_once("search", "Search broadcast on ch %d failed: %s", ch, e)
+        if pinged and bcast:
+            msg = ("Search: broadcast a discovery to the mesh + nudged "
+                   + ", ".join(pinged) + "; replies appear here and in Active.")
+        elif bcast:
+            msg = "Search: broadcast a discovery to the mesh; any node in range will reply."
+        elif pinged:
+            msg = ("Search: asked " + ", ".join(pinged)
+                   + " to check in; replies appear here and in Active.")
+        else:
+            msg = "Search: radio isn't ready to search yet."
         self.root.after(0, lambda: self.note(msg, "me"))
 
     # ---------- data ----------

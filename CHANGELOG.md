@@ -1,5 +1,14 @@
 # Changelog
 
+## 0.2.0-alpha — 2026-11-07
+
+- **Search is now a real mesh discovery, not just a hub ping.** Alongside nudging the nodes the
+  radio already knows, Search now **broadcasts a node-info request** (`^all`) on your primary and
+  drone channels, so **any node in range announces itself** — including one the hub has forgotten
+  or never saw. Previously it could only re-ping nodes already in the node database (your hubs), so
+  a quiet or dropped node (like the drone detector) couldn't be found. Targeted nudges to the drone
+  node are still sent.
+
 ## 0.1.0-alpha — 2026-11-01
 First public alpha by DaGromflomite.
 
