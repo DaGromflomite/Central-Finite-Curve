@@ -8,6 +8,16 @@
   or never saw. Previously it could only re-ping nodes already in the node database (your hubs), so
   a quiet or dropped node (like the drone detector) couldn't be found. Targeted nudges to the drone
   node are still sent.
+- **Background auto-discovery — the widget now actively tracks transient nodes.** On a timer it
+  sends a **DIRECT (0-hop) node-info request**, so a node that passes into range — even a silent one
+  — is prompted to check in without anyone clicking Search. Because every background request is
+  **0-hop, it only touches your local airspace and is never relayed into the wider mesh**, so it's
+  safe to run continuously. Short-lived daemon thread (no polling loop); measured CPU impact ≈ 0%.
+- **Tracking cadence setting** (*Settings → "Transient tracking"*). Default **Light — 3 min** keeps
+  the widget feather-light; choose **Active — 1 min** or **Real-time — 20 s** for near-live tracking
+  (still 0-hop / local-only), or **Off**. The interval is floored at 20 s so a config can never
+  hammer the air. The **manual Search** button stays the thorough option (pings known nodes + a
+  2-hop broadcast).
 
 ## 0.1.0-alpha — 2026-11-01
 First public alpha by DaGromflomite.
