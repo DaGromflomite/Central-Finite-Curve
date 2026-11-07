@@ -80,6 +80,12 @@ ACTIVE_MINS = 180  # a quiet node only announces itself every ~3 h, so a shorter
 PUSH_GAP = 30  # seconds between phone pushes; alerts in between are merged into the next one
 CLOCK_SECS = 6 * 3600  # re-send the PC's time this often, so a radio with no GPS doesn't drift
 SEARCH_GAP = 12  # seconds between manual searches, so clicking repeatedly doesn't flood the mesh
+AUTO_SEARCH_SECS = 180  # how often the background discovery runs (0 = off). This is what makes the
+# widget a *transient-node tracker*: every few minutes it sends a DIRECT (0-hop) node-info request so
+# any node that has passed into range — even a silent one — is prompted to announce itself. Because it
+# is 0-hop it only touches your local airspace and is never relayed into the wider mesh, so it is safe
+# to run on a timer. 180s is the light default; override with cfg "auto_search_secs".
+AUTO_SEARCH_MIN = 20  # hard floor on the interval — never let a config hammer the local airtime
 if sys.platform == "darwin":
     DEFAULT_SOUND = "/System/Library/Sounds/Ping.aiff"   # macOS built-in
 elif sys.platform == "win32":
@@ -1028,6 +1034,7 @@ class App:
         self.refresh_job = None
         self.refresh_cost = 0.0  # seconds the last batched refresh took
         self._last_search = 0    # when the Search button last pinged the mesh (rate limit)
+        self._auto_after = None  # pending background-discovery timer id
         self.row_cache = {}       # list widget -> {row id: (tags, values)} as last shown
 
         root.title("Central Finite Curve — DEMO" if DEMO else "Central Finite Curve")
@@ -1071,6 +1078,9 @@ class App:
             root.withdraw()
         self.root.after(200, self.pump)
         self.root.after(500, self.tick)
+        # Start the background transient-node discovery loop (first run shortly
+        # after startup, then every auto_search_secs).
+        self._schedule_auto_search(15)
 
     # ---------- tray ----------
     def start_tray(self):
@@ -1689,6 +1699,79 @@ class App:
             self.refresh()
             self.refresh_cost = time.perf_counter() - t0
 
+    # ---------- background transient-node discovery ----------
+    def _schedule_auto_search(self, delay=None):
+        """(Re)arm the background discovery. [delay] seconds, else the configured
+        interval (floored at AUTO_SEARCH_MIN). Cancels any pending run first, so a
+        cadence change takes effect promptly and never double-schedules. 0 = off."""
+        try:
+            if self._auto_after is not None:
+                self.root.after_cancel(self._auto_after)
+        except Exception:
+            pass
+        self._auto_after = None
+        try:
+            interval = int(self.cfg.get("auto_search_secs", AUTO_SEARCH_SECS))
+        except (TypeError, ValueError):
+            interval = AUTO_SEARCH_SECS
+        if interval > 0:
+            interval = max(AUTO_SEARCH_MIN, interval)  # floor: never hammer local airtime
+        when = interval if delay is None else delay
+        if when and when > 0:
+            self._auto_after = self.root.after(int(when) * 1000, self._auto_search)
+
+    def _auto_search(self):
+        """Timer callback: run one lightweight, mesh-safe discovery, then re-arm.
+        Skips cleanly when the radio is down."""
+        try:
+            if self.iface:
+                threading.Thread(target=self._do_discovery, args=(self.iface,),
+                                 daemon=True, name="auto-search").start()
+        except Exception:
+            warn_once("auto-search", "Background discovery failed to start", exc_info=True)
+        finally:
+            self._schedule_auto_search()
+
+    def _do_discovery(self, iface):
+        """LIGHTWEIGHT, mesh-safe background discovery. Unlike the manual Search, this sends
+        only DIRECT (hopLimit=0) requests: repeaters never relay them, so the wider mesh is
+        untouched — only nodes physically in range ("in the area") hear and answer, which is
+        exactly what a transient-node tracker wants. One small node-info request per channel,
+        plus a direct nudge to the tracked drone node. No multi-hop, no ping-all."""
+        if iface is not self.iface:
+            return
+        try:
+            from meshtastic import telemetry_pb2, portnums_pb2, mesh_pb2, BROADCAST_ADDR
+            uu = (iface.getMyNodeInfo() or {}).get("user", {}) or {}
+            myuser = mesh_pb2.User(id=uu.get("id", ""), long_name=uu.get("longName", ""),
+                                   short_name=uu.get("shortName", ""))
+        except Exception:
+            warn_once("auto-search", "Background discovery setup failed", exc_info=True)
+            return
+        dchan = self.channel_index(self.cfg.get("push_channel", "DroneAlert"))
+        sent = 0
+        # 0-hop broadcast node-info request: only direct neighbours answer and nothing is
+        # relayed onward, so this costs the wider mesh nothing.
+        for ch in sorted({0, dchan}):
+            try:
+                iface.sendData(myuser, destinationId=BROADCAST_ADDR,
+                               portNum=portnums_pb2.PortNum.NODEINFO_APP,
+                               wantResponse=True, channelIndex=ch, hopLimit=0)
+                sent += 1
+            except Exception as e:
+                warn_once("auto-search", "Background broadcast failed: %s", e)
+        # direct 0-hop nudge to the node we actually track, so it stays fresh
+        dn = self.cfg.get("drone_node_id")
+        if dn:
+            try:
+                iface.sendData(telemetry_pb2.Telemetry(), destinationId=dn,
+                               portNum=portnums_pb2.PortNum.TELEMETRY_APP,
+                               wantResponse=True, channelIndex=dchan, hopLimit=0)
+                sent += 1
+            except Exception as e:
+                warn_once("auto-search", "Drone nudge failed: %s", e)
+        log.info("Auto-discovery: %d direct (0-hop) request(s) sent", sent)
+
     # ---------- manual search ----------
     def search_now(self):
         """Refresh the window now, then actively ask quiet nodes to check in.
@@ -1710,7 +1793,9 @@ class App:
 
     def _do_search(self, iface):
         """Ping every radio-known node (and the drone detector by name/id) so they announce
-        themselves. Runs off the UI thread; replies arrive normally and update the lists."""
+        themselves, AND broadcast a discovery so transient/unknown nodes check in. Runs off the
+        UI thread; replies arrive normally and update the lists. This is the thorough MANUAL
+        search (Search button); the background tracker uses the lighter 0-hop _do_discovery."""
         if iface is not self.iface:
             return
         try:
@@ -1763,9 +1848,9 @@ class App:
                 iface.sendData(myuser if myuser is not None else b"",
                                destinationId=BROADCAST_ADDR,
                                portNum=portnums_pb2.PortNum.NODEINFO_APP,
-                               wantResponse=True, channelIndex=ch, hopLimit=3)
+                               wantResponse=True, channelIndex=ch, hopLimit=2)
                 bcast += 1
-                log.info("Search: broadcast node-info request on channel %d", ch)
+                log.info("Search: broadcast node-info request on channel %d (2-hop)", ch)
             except Exception as e:
                 warn_once("search", "Search broadcast on ch %d failed: %s", ch, e)
         if pinged and bcast:
@@ -2595,11 +2680,34 @@ class App:
         row(9, "Home location (lat, lon)\nstays on this PC",
             tk.Entry(win, textvariable=home_txt, width=24, bg=PANEL, fg=FG, insertbackground=FG))
 
+        # Transient-node tracking cadence. All options are 0-hop (local only), so even
+        # "Real-time" only touches your own airspace — never the wider mesh.
+        cad_map = {"Off": 0, "Light — 3 min (default)": 180,
+                   "Active — 1 min": 60, "Real-time — 20 s": 20}
+        cur_cad = int(self.cfg.get("auto_search_secs", AUTO_SEARCH_SECS))
+        cad_rev = {v: k for k, v in cad_map.items()}
+        cur_cad_label = cad_rev.get(cur_cad)
+        if cur_cad_label is None:
+            cur_cad_label = f"Custom — {cur_cad} s"
+            cad_map[cur_cad_label] = cur_cad
+        cadence = tk.StringVar(value=cur_cad_label)
+        row(10, "Transient tracking\n(0-hop, local only)",
+            ttk.Combobox(win, textvariable=cadence, state="readonly", width=22,
+                         values=list(cad_map)))
+
         def apply():
             before = (self.cfg["mode"], self.cfg["port"], self.cfg["host"])
             try:
                 self.cfg["active_mins"] = max(1, int(active_mins.get()))
             except ValueError:
+                pass
+            try:  # transient-tracking cadence (0 = off; floored otherwise)
+                new_cad = int(cad_map.get(cadence.get(), cur_cad))
+                new_cad = 0 if new_cad <= 0 else max(AUTO_SEARCH_MIN, new_cad)
+                if new_cad != int(self.cfg.get("auto_search_secs", AUTO_SEARCH_SECS)):
+                    self.cfg["auto_search_secs"] = new_cad
+                    self._schedule_auto_search(2)  # re-arm with the new cadence promptly
+            except (ValueError, TypeError):
                 pass
             try:
                 r = min(1000, max(5, int(online_radius.get())))
@@ -2641,7 +2749,7 @@ class App:
                 self.set_status("Settings saved — reconnecting…", WARN)
 
         tk.Button(win, text="Save", command=apply, bg=ACCENT, fg="#000", relief="flat",
-                  width=10).grid(row=10, column=1, sticky="e", padx=10, pady=10)
+                  width=10).grid(row=11, column=1, sticky="e", padx=10, pady=10)
         snd_box.bind("<<ComboboxSelected>>", lambda e: test())  # preview on pick
         win.protocol("WM_DELETE_WINDOW", apply)  # closing with X keeps changes too
 
