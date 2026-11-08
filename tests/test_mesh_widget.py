@@ -197,6 +197,25 @@ class Files(unittest.TestCase):
         self.assertEqual(mw.tail_lines(p, 3, chunk=4096), ["line 49997", "line 49998", "line 49999"])
         self.assertEqual(mw.tail_lines(self.path("none.jsonl"), 3), [])
 
+    def test_scrub_log(self):
+        line = ("Pinged Drone Detect (!02ed677c) at 41.948123,-79.981234 mac 8c:1e:d9:00:00:01 "
+                "push https://ntfy.sh/cfc-abc path C:\\Users\\Timot\\x.log on COM17, SNR 1.5 dB")
+        out = mw.scrub_log([line], ["Drone Detect"])[0]
+        for secret in ("Drone Detect", "02ed677c", "41.948123", "79.981234", "8c:1e:d9", "ntfy.sh", "Timot"):
+            self.assertNotIn(secret, out)
+        for kept in ("COM17", "1.5 dB", "Pinged"):
+            self.assertIn(kept, out)
+
+    def test_feedback_link(self):
+        url, cut = mw.feedback_link("[Bug] map", "short body")
+        self.assertFalse(cut)
+        self.assertTrue(url.startswith(mw.REPO_URL + "/issues/new?"))
+        self.assertIn("title=%5BBug%5D+map", url)
+        url, cut = mw.feedback_link("[Bug] long", "x" * 20000)
+        self.assertTrue(cut)
+        self.assertLessEqual(len(url), mw.FEEDBACK_URL_MAX)
+        self.assertIn("shortened", url)
+
     def test_prune_history(self):
         now = time.time()
         h = {"!old": {"last": now - 400 * 86400}, "!new": {"last": now}, "!none": {}}
@@ -330,6 +349,25 @@ class PhonePushes(unittest.TestCase):
         self.wait(done)
         self.assertEqual(sent[0][0], "Drone alert")
         self.assertIn("Drone Detect: RID drone 41.9,-79.9", sent[0][1])
+
+    def test_message_titles(self):
+        p, sent, done = self.make()
+        p.add("Chatty", "hi there", drone=False)
+        self.wait(done)
+        self.assertEqual(sent[0][0], "New message")
+        p.add("Drone Detect", "d1")
+        p.add("Chatty", "m1", drone=False)
+        p.add("Chatty", "m2", drone=False)
+        p.flush(now=time.time() + mw.PUSH_GAP + 1)
+        self.wait(done)
+        self.assertEqual(sent[1][0], "1 drone alert + 2 messages")
+
+    def test_ntfy_url(self):
+        self.assertEqual(mw.ntfy_url("cfc-abc_123"), "https://ntfy.sh/cfc-abc_123")
+        self.assertEqual(mw.ntfy_url(" https://ntfy.example.com/my-topic "), "https://ntfy.example.com/my-topic")
+        self.assertEqual(mw.ntfy_url(""), "")
+        self.assertIsNone(mw.ntfy_url("has spaces in it"))
+        self.assertIsNone(mw.ntfy_url("https://ntfy.sh/"))
 
     def test_burst_is_merged_and_nothing_lost(self):
         p, sent, done = self.make()
@@ -786,6 +824,46 @@ class Gui(unittest.TestCase):
             aw.destroy()
             app.clear_archive()
             r["archive_empty"] = os.path.getsize(mw.LOG_PATH) == 0
+            # phone push modes: drone-only by default, then direct messages, then everything
+            pushed = []
+
+            class FakePush:
+                def add(self, sender, text, drone=True):
+                    pushed.append((text, drone))
+            app.push = FakePush()
+            my = app.last_me[0]
+
+            def incoming(text, to_me, pid):
+                app.handle_packet({"fromId": "!0de30001", "id": pid, "toId": my if to_me else "^all",
+                                   "to": 1 if to_me else 0xFFFFFFFF, "channel": 0,
+                                   "decoded": {"portnum": "TEXT_MESSAGE_APP", "text": text}}, app.iface)
+            for mode, base in (("drone", 881000), ("dm", 882000), ("all", 883000)):
+                app.cfg["push_mode"] = mode
+                incoming(f"public {mode}", False, base + 1)
+                incoming(f"private {mode}", True, base + 2)
+                incoming("Drone: 60:60:1f:00:00:02 RSSI:-60 https://maps.google.com/?q=41.95,-79.97\r\n"
+                         "Pilot: https://maps.google.com/?q=41.94,-79.98\r\n", False, base + 3)
+            r["pushed"] = pushed
+            app.push = None
+            app.cfg["push_mode"] = "drone"
+            # feedback form: opens, builds a report with details, never sends anything by itself
+            opened = []
+            real_open = mw.webbrowser.open
+            mw.webbrowser.open = lambda url: opened.append(url)
+            try:
+                app.open_feedback()
+                root.update()
+                fw = app.feedback_win
+                entries = [c for c in fw.winfo_children() if c.winfo_class() == "Entry"]
+                entries[0].insert(0, "map pins jump around")
+                bar = [c for c in fw.winfo_children() if c.winfo_class() == "Frame"][-1]
+                [b for b in bar.winfo_children() if b["text"] == "Open on GitHub"][0].invoke()
+                root.update()
+            finally:
+                mw.webbrowser.open = real_open
+            r["feedback_url"] = opened[0] if opened else ""
+            fw.destroy()
+            app.hide_banner()
 
         def lose_radio(app, root, r):
             r["delivered"] = "delivered to Chatty" in app.msgs.get("1.0", "end") or \
@@ -830,6 +908,17 @@ class Gui(unittest.TestCase):
         self.assertTrue(r["new_still_shows"], "a new message after archiving a conversation was hidden")
         self.assertTrue(r["archive_finds"], "the archive search didn't find a cleared message")
         self.assertTrue(r["archive_empty"], "Clear archive left messages on disk")
+        self.assertIn("issues/new", r["feedback_url"], "feedback didn't open a GitHub issue link")
+        self.assertIn("map+pins+jump+around", r["feedback_url"])
+        self.assertIn("App+version", r["feedback_url"], "feedback report is missing the app details")
+        texts = [t for t, _ in r["pushed"]]
+        self.assertNotIn("public drone", texts, "drone-only mode pushed a channel message")
+        self.assertNotIn("private drone", texts, "drone-only mode pushed a direct message")
+        self.assertIn("private dm", texts, "direct-message mode didn't push a DM")
+        self.assertNotIn("public dm", texts, "direct-message mode pushed a channel message")
+        self.assertIn("public all", texts)
+        self.assertIn("private all", texts)
+        self.assertEqual(sum(1 for t, d in r["pushed"] if d), 3, "every drone alert should push, in every mode")
         self.assertTrue(r["radio_nodes_back"], "nodes the radio still knows didn't come back after clearing")
         self.assertTrue(r.get("card_shows_sent"), "a message sent from the card didn't show on it")
         self.assertTrue(r["chat_cleared"], "closing the card left its chat hooked up")
