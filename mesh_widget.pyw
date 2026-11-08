@@ -69,7 +69,7 @@ def asset_path(name):
     """Path to a bundled asset (icons), working from source and from a PyInstaller build."""
     base = getattr(sys, "_MEIPASS", HERE)
     return os.path.join(base, "assets", name)
-VERSION = "0.2.0-alpha"
+VERSION = "0.3.0-alpha"
 HEALTH_SECS = 600   # how often a health line (memory, CPU, nodes) goes into the log
 DEMO = False        # --demo: made-up nodes instead of a radio, with its own files (see enable_demo)
 log = logging.getLogger("centralfinitecurve")
@@ -239,6 +239,17 @@ def fetch_online(center, radius_km):
         log.debug("meshmap.net: skipped %d malformed nodes", skipped)
     return found
 MAP_FILTERS = ("All", "Nodes", "Repeaters")
+# the message panels along the bottom: (key, heading, starting width px, grows with the window?)
+# "chan" only ever holds what the radio could decrypt: public messages on channels this radio shares.
+MSG_PANELS = (("dm", "DIRECT MESSAGES", 380, "always"), ("drone", "DRONE DETECT", 220, "never"),
+              ("chan", "CHANNEL TRAFFIC", 380, "always"))
+DRONE_BANNER_SECS = 300  # the red banner hides 5 min after the last drone ping
+MSG_PANEL_LINES = 1000  # lines kept per panel (the full log stays in messages.jsonl)
+# Map "Show" choices: which radio-heard nodes get a pin, by when we last heard them.
+# "now" = the Active window (no grey pins); None = every node we've ever heard.
+MAP_SEEN = (("now", "Nodes currently active"), (3600, "Nodes active in the last hour"),
+            (86400, "Nodes active in the last day"), (30 * 86400, "Nodes active in the last month"),
+            (None, "All recorded nodes"))
 _ESRI = "https://server.arcgisonline.com/ArcGIS/rest/services/{}/MapServer/tile/{{z}}/{{y}}/{{x}}"
 MAP_STYLES = {  # name -> (base tiles, label overlay or None, max zoom); all free, no API key
     "Dark": (_ESRI.format("Canvas/World_Dark_Gray_Base"), _ESRI.format("Canvas/World_Dark_Gray_Reference"), 16),
@@ -279,7 +290,11 @@ def load_json(path):
         return {}
 
 
-MAX_MESSAGES = 2000    # message log lines kept on disk
+MAX_MESSAGES = 2000    # (old fixed cap; the log is now the chat archive, trimmed by age below)
+ARCHIVE_DAYS = 90      # default for Settings -> "Keep chat archive"; 0 = forever
+ARCHIVE_CHOICES = (("1 week", 7), ("1 month", 30), ("3 months", 90), ("1 year", 365), ("Forever", 0))
+ARCHIVE_CAP = 100_000  # hard ceiling on archived messages (~20 MB) even on "Forever"
+ARCHIVE_SHOW = 3000    # most recent matches the archive window shows
 MAX_HISTORY = 5000     # nodes remembered; the longest-unheard are dropped first
 HISTORY_DAYS = 365     # nodes unheard for this long are forgotten
 INSTANCE_PORT = 47431  # localhost port that stops a second copy starting (demo uses the next one)
@@ -302,6 +317,55 @@ def trim_lines(path, keep):
     except OSError:
         return 0
     return len(lines) - keep
+
+
+def trim_archive(path, keep_days, cap=ARCHIVE_CAP, now=None):
+    """Drop archived messages older than keep_days (0 = keep all), and the oldest beyond `cap`.
+    Streams the file and only rewrites it when something goes. Returns how many were dropped."""
+    cutoff = (now or time.time()) - keep_days * 86400 if keep_days > 0 else None
+    kept = collections.deque(maxlen=cap)
+    total = 0
+    try:
+        with open(path, encoding="utf-8") as f:
+            past_cutoff = cutoff is None
+            for line in f:
+                total += 1
+                if not past_cutoff:
+                    try:
+                        if float(json.loads(line).get("t", 0)) < cutoff:
+                            continue
+                    except (ValueError, AttributeError, TypeError):
+                        continue  # unreadable line: drop it with the old ones
+                    past_cutoff = True  # the log is in time order: everything after this is newer
+                kept.append(line)
+    except OSError:
+        return 0
+    if len(kept) == total:
+        return 0
+    tmp = path + ".tmp"
+    try:
+        with open(tmp, "w", encoding="utf-8") as f:
+            f.writelines(kept)
+        os.replace(tmp, path)
+    except OSError:
+        return 0
+    return total - len(kept)
+
+
+def tail_lines(path, count, chunk=262144):
+    """The last `count` lines of a file without reading all of it (the archive can be large)."""
+    try:
+        with open(path, "rb") as f:
+            f.seek(0, os.SEEK_END)
+            size = f.tell()
+            f.seek(max(0, size - chunk))
+            data = f.read()
+    except OSError:
+        return []
+    lines = data.decode("utf-8", "replace").splitlines()
+    if size > chunk:
+        lines = lines[1:]  # the first one is probably cut in half
+    return lines[-count:]
 
 
 def prune_history(history, now=None):
@@ -843,6 +907,10 @@ def offset(pos, north_km, east_km):
 
 
 class DemoInterface:
+    def sendData(self, data, destinationId="^all", portNum=None, wantResponse=False, channelIndex=0,
+                 hopLimit=None, **kw):
+        return type("Sent", (), {"id": self.rng.randint(1, 2 ** 31)})()
+
     """Stands in for a radio in --demo mode, publishing packets the way the meshtastic library does.
 
     The made-up mesh is built to hit awkward cases: hilltop repeaters, walkers/cyclist/car that move,
@@ -912,7 +980,7 @@ class DemoInterface:
     def getMyNodeInfo(self):
         return self.nodes[self.my_id]
 
-    def sendText(self, text, destinationId="^all", wantAck=False):
+    def sendText(self, text, destinationId="^all", wantAck=False, channelIndex=0, **kw):
         pid = self.rng.randint(1, 2 ** 31)
         target = next((s for s in self.sim if s["id"] == destinationId), None)
         if wantAck and target:
@@ -1021,11 +1089,17 @@ class App:
         self.port_used = None  # the COM port we actually opened (can differ from config after a fallback)
         self.clock_at = 0      # when we last set the radio's clock
         self.untimed = {}      # node id -> name, for nodes the radio knows but never timestamped
+        self.radio_nodes = []  # [(id, name)] the radio knows, newest first (top of the Message-to list)
+        self.dest_names = {}   # node id -> plain name, for every entry in the Message-to list
         url = self.cfg.get("push_url")
         self.push = PhonePush(url) if url and not DEMO else None  # messages on push_channel go to the phone
         self.rssi = {}        # node id -> last RSSI we measured
         self.heard = {}       # node id -> (time, snr) of the last packet we got from it
         self.pending = {}     # packet id -> (recipient name, time sent), waiting for an ACK
+        self.pending_nid = {} # packet id -> recipient node id, for follow-ups such as fetching a missing key
+        self.line_seq = 0     # message panels: each shown message gets a tag "m<seq>"...
+        self.line_msgs = {}   # ...that maps back to its record, for the right-click menu
+        self.key_asked = {}   # node id -> when we last asked it for its node info (public key)
         self.history = load_json(HIST_PATH)  # node id -> first/last seen, count, best signal
         self.hist_dirty = False
         self.seen_ids = {}    # packet ids already shown (a dict keeps them in order so the oldest can go)
@@ -1050,7 +1124,8 @@ class App:
                         self.cfg["geometry"])
             root.geometry(f"{g[1]}x{g[2]}+100+100")
         gone = prune_history(self.history)
-        cut = trim_lines(LOG_PATH, MAX_MESSAGES)
+        cut = trim_archive(LOG_PATH, self.archive_days())
+        self.archive_trimmed = time.time()
         if gone or cut:
             self.hist_dirty = bool(gone)
             log.info("Housekeeping: forgot %d old nodes, trimmed %d old messages", gone, cut)
@@ -1190,6 +1265,17 @@ class App:
 
         top = tk.Frame(self.root, bg=BG)
         top.pack(fill="x", padx=8, pady=(8, 4))
+        # red DRONE DETECTED banner: packed right under this bar only while alerts are coming in
+        self.top_bar = top
+        self.banner = tk.Frame(self.root, bg=BAD)
+        self.banner_lbl = tk.Label(self.banner, text="", bg=BAD, fg="#ffffff", anchor="w", justify="left",
+                                   font=("Segoe UI", 10, "bold"))
+        self.banner_lbl.pack(side="left", fill="x", expand=True, padx=10, pady=6)
+        bbtn = dict(bg="#ffffff", fg=BAD, relief="flat", activebackground="#ffe0de", font=("Segoe UI", 9, "bold"))
+        tk.Button(self.banner, text="Dismiss", command=self.hide_banner, **bbtn).pack(side="right", padx=(4, 8))
+        tk.Button(self.banner, text="Show on map", command=self.banner_to_map, **bbtn).pack(side="right")
+        self.banner_job = None
+        self.banner_pings = 0
         self.dot = tk.Label(top, text="●", fg=BAD, bg=BG, font=("Segoe UI", 12))
         self.dot.pack(side="left")
         self.status = tk.Label(top, text="Starting…", fg=FG, bg=BG, font=("Segoe UI", 10, "bold"))
@@ -1286,9 +1372,22 @@ class App:
             self.online_busy = False
             self.acc_polys = {}
             self.last_me = (None, {})
-            self.online_btn = tk.Button(f3, text=self.online_btn_text(), command=self.toggle_online,
-                                        bg=PANEL, fg=ONLINE, relief="flat", font=("Segoe UI", 8))
-            self.online_btn.place(relx=1.0, x=-6, y=34, anchor="ne")
+            # which radio-heard nodes get a pin: only the active ones, or everyone heard within a time frame
+            self.seen_box = ttk.Combobox(f3, state="readonly", width=30, font=("Segoe UI", 9),
+                                         values=[label for _, label in MAP_SEEN])
+            self.seen_box.set(self.seen_label())
+            self.seen_box.bind("<<ComboboxSelected>>", lambda e: self.set_map_seen(
+                next(k for k, label in MAP_SEEN if label == self.seen_box.get())))
+            self.seen_box.place(relx=1.0, x=-6, y=34, anchor="ne")
+            # internet-reported nodes (meshmap.net, purple pins) are a separate layer you can switch off
+            self.online_var = tk.BooleanVar(value=self.cfg.get("online_nodes", True))
+            self.online_btn = tk.Checkbutton(f3, text="Show internet-map nodes (purple)", variable=self.online_var,
+                                             command=self.toggle_online, bg=PANEL, fg=ONLINE, selectcolor=BG,
+                                             activebackground=PANEL, activeforeground=ONLINE,
+                                             font=("Segoe UI", 8), relief="flat", bd=0, padx=4)
+            self.online_btn.place(relx=1.0, x=-6, y=62, anchor="ne")
+            tk.Button(f3, text="Clear map history", command=self.clear_map_history, bg=PANEL, fg=DIM,
+                      relief="flat", font=("Segoe UI", 8)).place(relx=1.0, x=-6, y=88, anchor="ne")
             self.tabs.add(f3, text="Map")
             self.map_tab = f3
             self.tabs.bind("<<NotebookTabChanged>>", self.sync_map_awake)
@@ -1319,17 +1418,31 @@ class App:
         tk.Label(mhead, text="MESSAGES", fg=DIM, bg=BG, font=("Segoe UI", 8, "bold")).pack(side="left")
         tk.Button(mhead, text="Clear", command=self.clear_messages, bg=BG, fg=DIM, relief="flat",
                   activebackground=PANEL, font=("Segoe UI", 8), bd=0).pack(side="right")
-        self.msgs = tk.Text(self.root, bg=PANEL, fg=FG, relief="flat", wrap="word",
-                            font=("Segoe UI", 9), state="disabled", height=10)
-        self.msgs.pack(fill="both", expand=True, padx=8)
-        self.msgs.tag_configure("time", foreground=DIM)
-        self.msgs.tag_configure("who", foreground=ACCENT)
-        self.msgs.tag_configure("dm", foreground=WARN)
-        self.msgs.tag_configure("me", foreground=GOOD)
+        tk.Button(mhead, text="Archive", command=self.open_archive, bg=BG, fg=DIM, relief="flat",
+                  activebackground=PANEL, font=("Segoe UI", 8), bd=0).pack(side="right", padx=(0, 10))
+        # three message panels side by side; drag the gaps between them to resize
+        panes = tk.PanedWindow(self.root, orient="horizontal", bg=BG, sashwidth=6, bd=0, sashrelief="flat")
+        panes.pack(fill="both", expand=True, padx=8)
+        self.panels = {}
+        for key, title, width, stretch in MSG_PANELS:
+            frame = tk.Frame(panes, bg=BG)
+            head = tk.Frame(frame, bg=BG)
+            head.pack(fill="x")
+            label = tk.Label(head, text=title, fg=DIM, bg=BG, font=("Segoe UI", 8, "bold"))
+            label.pack(side="left")
+            tk.Button(head, text="Open in window ↗", command=lambda k=key: self.pop_panel(k), bg=BG, fg=DIM,
+                      relief="flat", activebackground=PANEL, font=("Segoe UI", 8), bd=0).pack(side="right")
+            txt = self.make_msg_text(frame, height=10, width=20)
+            txt.pack(fill="both", expand=True)
+            self.bind_msg_menu(txt)
+            panes.add(frame, minsize=120, width=width, stretch=stretch)
+            self.panels[key] = {"title": title, "label": label, "texts": [txt], "win": None,
+                                "lines": collections.deque(maxlen=MSG_PANEL_LINES)}
+        self.msgs = self.panels["dm"]["texts"][0]
 
         bottom = tk.Frame(self.root, bg=BG)
         bottom.pack(fill="x", padx=8, pady=8)
-        self.dest = ttk.Combobox(bottom, state="readonly", width=14, values=["Everyone"])
+        self.dest = ttk.Combobox(bottom, state="readonly", width=26, values=["Everyone"])
         self.dest.set("Everyone")
         self.dest.pack(side="left")
         self.entry = tk.Entry(bottom, bg=PANEL, fg=FG, insertbackground=FG, relief="flat")
@@ -1344,6 +1457,202 @@ class App:
         self.tray_color = color
         self.update_tray()
 
+    @staticmethod
+    def make_msg_text(parent, height, width):
+        txt = tk.Text(parent, bg=PANEL, fg=FG, relief="flat", wrap="word", font=("Segoe UI", 9),
+                      state="disabled", height=height, width=width, padx=4, pady=2)
+        for tag, colour in (("time", DIM), ("who", ACCENT), ("dm", WARN), ("me", GOOD), ("bad", BAD)):
+            txt.tag_configure(tag, foreground=colour)
+        return txt
+
+    def bind_msg_menu(self, txt):
+        txt.bind("<Button-3>", lambda e, t=txt: self.msg_menu(t, e))
+
+    @staticmethod
+    def msg_key(m):
+        return str(m.get("id") or f"{m.get('t')}|{m.get('from')}")
+
+    def msg_peer(self, m):
+        """(key, name) of the node a message is a conversation with."""
+        if m.get("mine"):
+            nid, name = m.get("tid"), m.get("to")
+        else:
+            nid, name = m.get("fid"), m.get("from")
+        return (nid or f"name:{name}"), name
+
+    def is_archived(self, m):
+        arch = self.cfg.get("archived_ids") or []
+        if self.msg_key(m) in arch:
+            return True
+        until = (self.cfg.get("archived_peers") or {}).get(self.msg_peer(m)[0])
+        try:
+            return until is not None and float(m.get("t", 0)) <= float(until)
+        except (TypeError, ValueError):
+            return False
+
+    def msg_menu(self, txt, event):
+        mtag = next((t for t in txt.tag_names(f"@{event.x},{event.y}") if t.startswith("m") and t[1:].isdigit()), None)
+        m = self.line_msgs.get(mtag)
+        if m is None:
+            return
+        peer, name = self.msg_peer(m)
+        menu = tk.Menu(txt, tearoff=0, bg=PANEL, fg=FG, activebackground=ACCENT, activeforeground="#000")
+        menu.add_command(label="Archive this message", command=lambda: self.archive_msgs(msg=m))
+        if name and name != "Everyone":
+            menu.add_command(label=f"Archive whole conversation with {name}"[:60],
+                             command=lambda: self.archive_msgs(peer=peer))
+            if not peer.startswith("name:") and hasattr(self, "info_win"):
+                menu.add_separator()
+                menu.add_command(label=f"Open {name}'s card"[:60], command=lambda: self.show_node_info(peer))
+        try:
+            menu.tk_popup(event.x_root, event.y_root)
+        finally:
+            menu.grab_release()
+
+    def archive_msgs(self, msg=None, peer=None):
+        """Hide a message, or a whole conversation up to now, from the panels. Nothing is deleted:
+        it all stays searchable in the archive window. New messages from that node still show."""
+        if msg is not None:
+            arch = list(self.cfg.get("archived_ids") or [])
+            arch.append(self.msg_key(msg))
+            self.cfg["archived_ids"] = arch[-5000:]
+        if peer is not None:
+            peers = dict(self.cfg.get("archived_peers") or {})
+            peers[peer] = time.time()
+            self.cfg["archived_peers"] = peers
+        save_cfg(self.cfg)
+        self.rebuild_panels()
+
+    def rebuild_panels(self):
+        """Redraw every panel from its remembered lines, leaving out archived messages."""
+        for panel in self.panels.values():
+            keep = collections.deque(maxlen=MSG_PANEL_LINES)
+            for segments, mtag in panel["lines"]:
+                m = self.line_msgs.get(mtag)
+                if m is None or not self.is_archived(m):
+                    keep.append((segments, mtag))
+            panel["lines"] = keep
+            for txt in panel["texts"]:
+                try:
+                    txt.config(state="normal")
+                    txt.delete("1.0", "end")
+                    for segments, mtag in keep:
+                        for text, tag in segments:
+                            txt.insert("end", text, (tag, mtag) if tag else (mtag,))
+                    txt.see("end")
+                    txt.config(state="disabled")
+                except tk.TclError:
+                    pass
+
+    def msg_kind(self, m):
+        """Which panel a message belongs in: drone alerts, direct messages, or channel traffic."""
+        text = m.get("text", "")
+        if (DRONE_RE.search(text) or text.lstrip().startswith("Drone:") or m.get("ch") == self.cfg.get("push_channel", "DroneAlert")
+                or (m.get("fid") and m.get("fid") == self.cfg.get("drone_node_id"))):
+            return "drone"
+        return "dm" if m.get("to") not in (None, "Everyone") else "chan"
+
+    def panel_write(self, key, segments, m=None):
+        """Add one line [(text, tag)] to a panel and to its pop-out window if that's open.
+        m = the message it shows, so right-click can archive it (None for notes)."""
+        panel = self.panels[key]
+        self.line_seq += 1
+        mtag = f"m{self.line_seq}"
+        if m is not None:
+            self.line_msgs[mtag] = m
+            if len(self.line_msgs) > 4 * MSG_PANEL_LINES:  # forget the oldest (they've scrolled off)
+                for old in list(self.line_msgs)[:MSG_PANEL_LINES]:
+                    del self.line_msgs[old]
+        panel["lines"].append((segments, mtag))
+        alive = []
+        for txt in panel["texts"]:
+            try:
+                txt.config(state="normal")
+                for text, tag in segments:
+                    txt.insert("end", text, (tag, mtag) if tag else (mtag,))  # plain text only
+                excess = int(txt.index("end-1c").split(".")[0]) - MSG_PANEL_LINES
+                if excess > 0:
+                    txt.delete("1.0", f"{excess + 1}.0")
+                txt.see("end")
+                txt.config(state="disabled")
+                alive.append(txt)
+            except tk.TclError:
+                pass  # its window was closed
+        panel["texts"] = alive
+
+    def pop_panel(self, key):
+        """Show one message panel in its own resizable window (it keeps updating live)."""
+        panel = self.panels[key]
+        if panel["win"] is not None and panel["win"].winfo_exists():
+            panel["win"].deiconify()
+            panel["win"].lift()
+            return
+        win = panel["win"] = tk.Toplevel(self.root, bg=BG)
+        win.title(f"{panel['title'].title()} - Central Finite Curve")
+        win.geometry("640x420")
+        win.attributes("-topmost", self.cfg.get("on_top", False))
+        txt = self.make_msg_text(win, height=24, width=80)
+        bar = ttk.Scrollbar(win, orient="vertical", command=txt.yview)
+        txt.config(yscrollcommand=bar.set)
+        bar.pack(side="right", fill="y")
+        txt.pack(fill="both", expand=True, padx=(8, 0), pady=8)
+        txt.config(state="normal")
+        for segments, mtag in panel["lines"]:
+            for text, tag in segments:
+                txt.insert("end", text, (tag, mtag) if tag else (mtag,))
+        txt.see("end")
+        txt.config(state="disabled")
+        panel["texts"].append(txt)
+        self.bind_msg_menu(txt)
+        self.panel_controls(key, win, txt)
+        win.bind("<Escape>", lambda e: win.destroy())
+
+    def panel_controls(self, key, win, txt):
+        """The send bar (and extras) for a popped-out message window, matching what that panel is for."""
+        bar = tk.Frame(win, bg=BG)
+        bar.pack(side="bottom", fill="x", padx=8, pady=(0, 8), before=txt)
+        btn = dict(bg=PANEL, fg=FG, relief="flat", activebackground="#2c3a4a", font=("Segoe UI", 9))
+        if key == "dm":
+            box = ttk.Combobox(bar, state="readonly", width=26, values=list(self.dest["values"]))
+            cur = self.dest.get()
+            box.set(cur if cur != "Everyone" else (box["values"][1] if len(box["values"]) > 1 else "Everyone"))
+            box.pack(side="left")
+            if not hasattr(self, "dest_boxes"):
+                self.dest_boxes = []
+            self.dest_boxes.append(box)
+
+            def target():
+                v = box.get()
+                return (v.rsplit("[", 1)[1].rstrip("]"), 0) if "[" in v else ("^all", 0)
+        elif key == "chan":
+            chans = self.channel_list()
+            box = ttk.Combobox(bar, state="readonly", width=18, values=[label for _, label in chans])
+            box.set(chans[0][1])
+            box.pack(side="left")
+
+            def target():
+                label = box.get()
+                return "^all", next((i for i, l in chans if l == label), 0)
+        else:  # drone
+            tk.Button(bar, text="Show on map", command=self.banner_to_map, **btn).pack(side="left")
+            drone_ch = self.cfg.get("push_channel", "DroneAlert")
+            tk.Label(bar, text=f" to #{drone_ch}", bg=BG, fg=DIM, font=("Segoe UI", 9)).pack(side="left")
+
+            def target():
+                return "^all", self.channel_index(drone_ch)
+        entry = tk.Entry(bar, bg=PANEL, fg=FG, insertbackground=FG, relief="flat")
+        entry.pack(side="left", fill="x", expand=True, padx=6, ipady=3)
+
+        def send(event=None):
+            node_id, channel = target()
+            if self.send_text(entry.get().strip(), node_id, channel=channel):
+                entry.delete(0, "end")
+        entry.bind("<Return>", send)
+        tk.Button(bar, text="Send", command=send, bg=ACCENT, fg="#000", relief="flat").pack(side="left")
+        tk.Button(bar, text="Clear all", command=self.clear_messages, bg=BG, fg=DIM, relief="flat",
+                  activebackground=PANEL, font=("Segoe UI", 8), bd=0).pack(side="right", padx=(6, 0))
+        entry.focus_set()
+
     def add_msg(self, m, notify):
         if m["id"] and m["id"] in self.seen_ids:
             return
@@ -1352,14 +1661,26 @@ class App:
             for old in list(self.seen_ids)[:1000]:
                 del self.seen_ids[old]
         when = datetime.datetime.fromtimestamp(m["t"]).strftime("%m/%d %H:%M")
-        self.msgs.config(state="normal")
-        self.msgs.insert("end", f"{when}  ", "time")
-        self.msgs.insert("end", m["from"], "me" if m.get("mine") else "who")
+        kind = self.msg_kind(m)
+        if self.is_archived(m):
+            return  # archived from the panels by the user; still in the archive window
+        line = [(f"{when}  ", "time"), (m["from"], "me" if m.get("mine") else "who")]
         if m["to"] != "Everyone":
-            self.msgs.insert("end", f" → {m['to']}", "dm")
-        self.msgs.insert("end", f": {m['text']}\n")
-        self.msgs.see("end")
-        self.msgs.config(state="disabled")
+            line.append((f" → {m['to']}", "dm"))
+        elif kind == "chan" and m.get("ch"):
+            line.append((f" #{m['ch']}", "time"))
+        mt = DRONE_RE.search(m["text"]) if kind == "drone" else None
+        if mt:
+            vendor = oui_vendor(mt.group(1))
+            line.append((f": {mt.group(1)}{' (' + vendor + ')' if vendor else ''}  RSSI {mt.group(2)}\n"
+                         f"    drone {float(mt.group(3)):.5f}, {float(mt.group(4)):.5f}\n"
+                         f"    pilot {float(mt.group(5)):.5f}, {float(mt.group(6)):.5f}\n", None))
+        else:
+            line.append((f": {m['text']}\n", None))
+        self.panel_write(kind, line, m)
+        chat = getattr(self, "card_chat", None)
+        if chat and self.with_node(m, chat[1], chat[2]):
+            self.chat_line(chat[0], m)
         if notify:
             if self.cfg["sound"]:
                 alert(self.cfg)
@@ -1369,10 +1690,42 @@ class App:
                 self.update_tray()
 
     def note(self, text, tag):
-        self.msgs.config(state="normal")
-        self.msgs.insert("end", f"        {text}\n", tag)
-        self.msgs.see("end")
-        self.msgs.config(state="disabled")
+        self.panel_write("dm", [(f"        {text}\n", tag)])  # delivery reports belong with direct messages
+        chat = getattr(self, "card_chat", None)
+        if chat and (text.endswith(f" {chat[2]}") or f" {chat[2]} (" in text):  # delivery reports
+            self.chat_note(chat[0], text, tag)
+
+    @staticmethod
+    def with_node(m, nid, name):
+        """Is message m part of our conversation with node nid? (Its posts, or what we sent it.)"""
+        if "fid" in m or "tid" in m:
+            return m.get("fid") == nid or bool(m.get("mine") and m.get("tid") == nid)
+        # older records only have names
+        return (not m.get("mine") and m.get("from") == name) or bool(m.get("mine") and m.get("to") == name)
+
+    def chat_line(self, txt, m):
+        try:
+            txt.config(state="normal")
+            txt.delete("1.0", "placeholder.last + 1c") if txt.tag_ranges("placeholder") else None
+            when = datetime.datetime.fromtimestamp(m["t"]).strftime("%m/%d %H:%M")
+            txt.insert("end", f"{when}  ", "time")
+            txt.insert("end", "Me" if m.get("mine") else m["from"], "me" if m.get("mine") else "who")
+            if not m.get("mine") and m.get("to") == "Everyone":
+                txt.insert("end", " → Everyone", "time")
+            txt.insert("end", f": {m['text']}\n")  # text from strangers: plain text only
+            txt.see("end")
+            txt.config(state="disabled")
+        except tk.TclError:
+            pass  # card closed
+
+    def chat_note(self, txt, text, tag):
+        try:
+            txt.config(state="normal")
+            txt.insert("end", f"        {text}\n", tag)
+            txt.see("end")
+            txt.config(state="disabled")
+        except tk.TclError:
+            pass
 
     def on_configure(self, event):
         # save size/position shortly after a move or resize, so a shutdown doesn't lose it
@@ -1389,19 +1742,47 @@ class App:
             self.cfg["geometry"] = geo
             save_cfg(self.cfg)
 
-    def clear_messages(self):
-        if not messagebox.askyesno("Clear messages", "Clear all messages from the list?\n\n"
-                                   "(A backup is kept in messages-backup.jsonl.)", parent=self.root):
+    def clear_map_history(self):
+        if not messagebox.askyesno(
+                "Clear map history",
+                "Remove every recorded node from the map and the History tab?\n\n"
+                "Nodes still in your radio's own node list reappear straight away. "
+                "(A backup is kept in nodes-history-backup.json.)", parent=self.root):
             return
         try:
-            if os.path.exists(LOG_PATH):
-                os.replace(LOG_PATH, os.path.join(HERE, "messages-backup.jsonl"))
+            if os.path.exists(HIST_PATH):
+                os.replace(HIST_PATH, os.path.join(os.path.dirname(HIST_PATH), "nodes-history-backup.json"))
         except OSError:
-            pass
-        self.msgs.config(state="normal")
-        self.msgs.delete("1.0", "end")
-        self.msgs.config(state="disabled")
-        self.pending.clear()
+            log.warning("Couldn't back up the node history", exc_info=True)
+        self.history.clear()
+        self.heard.clear()  # otherwise the next refresh rebuilds history from this session's sightings
+        self.hist_dirty = True
+        save_json(HIST_PATH, self.history)
+        log.info("Map history cleared by the user")
+        self.map_idx = -1
+        if self.iface:
+            self.refresh()
+        else:
+            self.update_map()
+
+    def clear_messages(self):
+        if not messagebox.askyesno("Clear messages", "Clear the message panels?\n\n"
+                                   "They stay in the chat archive (Archive button).", parent=self.root):
+            return
+        self.cfg["cleared_at"] = time.time()  # so a restart doesn't bring them back into the panels
+        save_cfg(self.cfg)
+        self.wipe_panels()
+
+    def wipe_panels(self):
+        for panel in self.panels.values():
+            panel["lines"].clear()
+            for txt in panel["texts"]:
+                try:
+                    txt.config(state="normal")
+                    txt.delete("1.0", "end")
+                    txt.config(state="disabled")
+                except tk.TclError:
+                    pass
         self.clear_unread()
 
     def clear_unread(self):
@@ -1410,16 +1791,130 @@ class App:
         self.update_tray()
 
     def load_history(self):
-        try:
-            with open(LOG_PATH, encoding="utf-8") as f:
-                lines = f.readlines()[-200:]
-        except OSError:
-            return
-        for line in lines:
+        cleared = float(self.cfg.get("cleared_at", 0) or 0)  # "Clear" hides older ones from the panels only
+        for line in tail_lines(LOG_PATH, 300):
             try:
-                self.add_msg(json.loads(line), notify=False)
-            except ValueError:
+                m = json.loads(line)
+                if isinstance(m, dict) and float(m.get("t", 0)) > cleared:
+                    self.add_msg(m, notify=False)
+            except (ValueError, TypeError, KeyError):
                 pass
+
+    def archive_days(self):
+        try:
+            return max(0, int(self.cfg.get("archive_days", ARCHIVE_DAYS)))
+        except (TypeError, ValueError):
+            return ARCHIVE_DAYS
+
+    def open_archive(self):
+        """Search old messages. Reads the archive file only when asked, so it costs nothing while closed."""
+        if getattr(self, "archive_win", None) is not None and self.archive_win.winfo_exists():
+            self.archive_win.deiconify()
+            self.archive_win.lift()
+            return
+        win = self.archive_win = tk.Toplevel(self.root, bg=BG)
+        win.title("Chat archive - Central Finite Curve")
+        win.geometry("760x520")
+        win.attributes("-topmost", self.cfg.get("on_top", False))
+        bar = tk.Frame(win, bg=BG)
+        bar.pack(fill="x", padx=8, pady=8)
+        tk.Label(bar, text="Search", bg=BG, fg=DIM, font=("Segoe UI", 9)).pack(side="left")
+        query = tk.Entry(bar, bg=PANEL, fg=FG, insertbackground=FG, relief="flat", width=24)
+        query.pack(side="left", padx=6, ipady=3)
+        kinds = {"All messages": None, "Direct messages": "dm", "Drone detect": "drone", "Channel traffic": "chan"}
+        kind = ttk.Combobox(bar, state="readonly", width=15, values=list(kinds))
+        kind.set("All messages")
+        kind.pack(side="left")
+        spans = {"Today": 1, "Last 7 days": 7, "Last 30 days": 30, "Everything": 0}
+        span = ttk.Combobox(bar, state="readonly", width=12, values=list(spans))
+        span.set("Last 7 days")
+        span.pack(side="left", padx=6)
+        count = tk.Label(bar, text="", bg=BG, fg=DIM, font=("Segoe UI", 8))
+        count.pack(side="right")
+        txt = self.make_msg_text(win, height=24, width=90)
+        sb = ttk.Scrollbar(win, orient="vertical", command=txt.yview)
+        txt.config(yscrollcommand=sb.set)
+        sb.pack(side="right", fill="y", padx=(0, 8), pady=(0, 8))
+        txt.pack(fill="both", expand=True, padx=(8, 0), pady=(0, 8))
+        keep = self.archive_days()
+        footbar = tk.Frame(win, bg=BG)
+        foot = tk.Label(footbar, text=("Messages are kept for " + next((l for l, d in ARCHIVE_CHOICES if d == keep),
+                                                                    f"{keep} days")
+                                   + " (change in Settings)."), bg=BG, fg=DIM, font=("Segoe UI", 8))
+        footbar.pack(side="bottom", fill="x", padx=8, pady=(0, 6), before=sb)
+        foot.pack(side="left")
+
+        def search(event=None):
+            needle = query.get().strip().lower()
+            want = kinds.get(kind.get())
+            days = spans.get(span.get(), 7)
+            since = time.time() - days * 86400 if days else 0
+            found = collections.deque(maxlen=ARCHIVE_SHOW)
+            total = 0
+            try:
+                with open(LOG_PATH, encoding="utf-8") as f:
+                    for line in f:
+                        if needle and needle not in line.lower():
+                            continue  # cheap text check before decoding each line
+                        try:
+                            m = json.loads(line)
+                            if float(m.get("t", 0)) < since or (want and self.msg_kind(m) != want):
+                                continue
+                        except (ValueError, AttributeError, TypeError):
+                            continue
+                        if needle and needle not in f"{m.get('from', '')} {m.get('to', '')} {m.get('text', '')}".lower():
+                            continue
+                        total += 1
+                        found.append(m)
+            except OSError:
+                pass
+            txt.config(state="normal")
+            txt.delete("1.0", "end")
+            for m in found:
+                when = datetime.datetime.fromtimestamp(m["t"]).strftime("%Y-%m-%d %H:%M")
+                txt.insert("end", f"{when}  ", "time")
+                txt.insert("end", str(m.get("from", "?")), "me" if m.get("mine") else "who")
+                if m.get("to") not in (None, "Everyone"):
+                    txt.insert("end", f" → {m['to']}", "dm")
+                elif m.get("ch"):
+                    txt.insert("end", f" #{m['ch']}", "time")
+                txt.insert("end", f": {m.get('text', '')}\n")  # plain text only
+            if not found:
+                txt.insert("end", "No messages found.\n", "time")
+            txt.see("end")
+            txt.config(state="disabled")
+            count.config(text=f"{total} found" + (f", newest {ARCHIVE_SHOW} shown" if total > ARCHIVE_SHOW else ""))
+        query.bind("<Return>", search)
+        kind.bind("<<ComboboxSelected>>", search)
+        span.bind("<<ComboboxSelected>>", search)
+        tk.Button(bar, text="Search", command=search, bg=ACCENT, fg="#000", relief="flat").pack(side="left")
+
+        def clear_archive():
+            if not messagebox.askyesno("Clear chat archive",
+                                       "Permanently delete every archived message?\n\n"
+                                       "This also empties the message panels and can't be undone.", parent=win):
+                return
+            self.clear_archive()
+            search()
+        tk.Button(footbar, text="Clear archive", command=clear_archive, bg=BG, fg=BAD, relief="flat",
+                  activebackground=PANEL, font=("Segoe UI", 8), bd=0).pack(side="right")
+        win.bind("<Escape>", lambda e: win.destroy())
+        query.focus_set()
+        search()
+
+    def clear_archive(self):
+        """Delete the whole chat archive (the message log) and empty the panels."""
+        try:
+            with open(LOG_PATH, "w", encoding="utf-8"):
+                pass
+        except OSError:
+            log.warning("Couldn't clear the chat archive", exc_info=True)
+            self.set_status("Couldn't clear the chat archive", BAD)
+            return
+        self.cfg["cleared_at"] = time.time()
+        save_cfg(self.cfg)
+        self.wipe_panels()
+        log.info("Chat archive cleared by the user")
 
     def log_msg(self, m):
         try:
@@ -1552,6 +2047,11 @@ class App:
             self.connect()
 
     def tick(self):
+        if time.time() - getattr(self, "archive_trimmed", 0) > 86400:
+            self.archive_trimmed = time.time()
+            cut = trim_archive(LOG_PATH, self.archive_days())
+            if cut:
+                log.info("Chat archive: removed %d messages older than the keep setting", cut)
         if (not self.paused and self.iface is None and not self.connecting
                 and time.time() - self.last_try > RETRY_SECS):
             self.connect()
@@ -1675,15 +2175,27 @@ class App:
         if dec.get("portnum") == "ROUTING_APP" and req in self.pending:
             err = dec.get("routing", {}).get("errorReason", "NONE")
             who = self.pending.pop(req)[0]
-            self.note(f"✓ delivered to {who}" if err == "NONE" else f"✗ not delivered to {who} ({err})",
-                      "me" if err == "NONE" else "dm")
+            nid = self.pending_nid.pop(req, None)
+            if err == "PKI_SEND_FAIL_PUBLIC_KEY":
+                # the radio won't send a direct message until it has the node's public key
+                self.note(f"✗ not sent to {who}: your radio doesn't have its encryption key yet. "
+                          f"Asked it for the key; send again once it replies", "dm")
+                if nid:
+                    self.request_key(nid, force=True)
+            else:
+                self.note(f"✓ delivered to {who}" if err == "NONE" else f"✗ not delivered to {who} ({err})",
+                          "me" if err == "NONE" else "dm")
         if dec.get("portnum") == "TEXT_MESSAGE_APP" and "text" in dec:
             to = "Everyone" if packet.get("to") == 0xFFFFFFFF else self.name(packet.get("toId"))
             m = {"id": packet.get("id"), "t": packet.get("rxTime") or time.time(),
-                 "from": self.name(frm), "to": to, "text": dec["text"]}
+                 "from": self.name(frm), "to": to, "text": dec["text"],
+                 "fid": frm, "tid": None if to == "Everyone" else packet.get("toId"),
+                 "ch": self.channel_name(packet.get("channel", 0))}
             self.log_msg(m)
             self.add_msg(m, notify=True)
             self.add_drone_point(dec["text"], m["t"])  # plots it on the Drone track tab if it's an alert
+            if self.msg_kind(m) == "drone" and dec["text"].lstrip().startswith("Drone:"):
+                self.show_banner(dec["text"])
             if self.push and self.channel_name(packet.get("channel", 0)) == self.cfg.get("push_channel", "DroneAlert"):
                 self.push.add(m["from"], m["text"])
         # rebuilding the lists and map per packet costs ~10% CPU on a busy mesh: batch into one refresh a second
@@ -1873,6 +2385,19 @@ class App:
         except Exception:
             return ""
 
+    def channel_list(self):
+        """[(index, label)] for every enabled channel on our radio; the primary is always first."""
+        out = []
+        try:
+            for i, ch in enumerate(self.iface.localNode.channels):
+                if i and not getattr(ch, "role", 0):
+                    continue  # role 0 = disabled slot
+                name = getattr(ch.settings, "name", "")
+                out.append((i, name or ("Primary" if i == 0 else f"Channel {i}")))
+        except Exception:
+            pass
+        return out or [(0, "Primary")]
+
     def channel_index(self, name):
         """Index of our radio's channel with this name, or 0 (the primary) if there isn't one."""
         try:
@@ -1994,12 +2519,56 @@ class App:
         self.tabs.tab(1, text=f"History ({len(self.history)})")
         self.update_map(my_id, pos, now, window)
 
-        names = ["Everyone"] + [f"{name} [{nid}]" for _, nid, name, _ in others]
-        if list(self.dest["values"]) != names:
-            cur = self.dest.get()
-            self.dest["values"] = names
-            if cur not in names:
-                self.dest.set("Everyone")
+        self.radio_nodes = [(nid, name) for _, nid, name, _ in others]
+        self.sync_dest()
+
+    def sync_dest(self):
+        """Message-to list: every node our radio knows (newest first), then every other node pinned on the
+        map (heard before, or from the internet map). Any of them can be sent a direct message."""
+        my_id = getattr(self, "last_me", (None,))[0]
+        online = getattr(self, "online", {})
+        names, extra = {}, []
+        for nid, name in self.radio_nodes:
+            names[nid] = name
+        for nid, p in getattr(self, "map_points", {}).items():
+            if nid == my_id or nid in names:
+                continue
+            o = online.get(nid) if nid not in self.history else None
+            name = o["name"] if o else self.history.get(nid, {}).get("name", nid)
+            extra.append((p[5] or 0, nid, name, bool(o)))
+        labels = ["Everyone"] + [f"{name} [{nid}]" for nid, name in self.radio_nodes if nid != my_id]
+        for _, nid, name, internet in sorted(extra, key=lambda e: e[0], reverse=True):
+            names[nid] = name
+            labels.append(f"{name} (internet) [{nid}]" if internet else f"{name} [{nid}]")
+        cur = self.dest.get()
+        cur_id = cur.rsplit("[", 1)[1].rstrip("]") if "[" in cur else None
+        if cur_id and cur not in labels:
+            # the chosen node dropped off the map (or was picked from History): keep it while it's chosen,
+            # so a refresh never swaps the recipient to Everyone mid-message
+            labels.append(cur)
+            names.setdefault(cur_id, self.dest_names.get(cur_id, cur_id))
+        self.dest_names = names
+        if list(self.dest["values"]) != labels:
+            self.dest["values"] = labels
+        for box in list(getattr(self, "dest_boxes", [])):
+            try:
+                cur = box.get()
+                want = labels + ([cur] if cur not in labels and cur != "Everyone" else [])
+                if list(box["values"]) != want:
+                    box["values"] = want
+            except tk.TclError:
+                self.dest_boxes.remove(box)  # its window was closed
+
+    def set_dest(self, nid):
+        """Point the Message-to list at a node, adding it if it isn't listed (e.g. picked from History)."""
+        match = [v for v in self.dest["values"] if v.endswith(f"[{nid}]")]
+        if not match:
+            name = self.history.get(nid, {}).get("name") or getattr(self, "online", {}).get(nid, {}).get("name") or nid
+            self.dest_names[nid] = name
+            match = [f"{name} [{nid}]"]
+            self.dest["values"] = list(self.dest["values"]) + match
+        self.dest.set(match[0])
+        self.entry.focus_set()
 
     def sync_tree(self, tree, rows):
         """Make a list show `rows` [(id, tags, values)] by changing only what differs. Rebuilding every row
@@ -2041,7 +2610,10 @@ class App:
         # around us, so every node shows up the moment it's heard
         self.unlocated = set()
         ring = []
+        span = self.seen_span(window)
         for nid, h in self.history.items():
+            if span is not None and now - h.get("last", 0) > span:
+                continue  # older than the map's "Show" choice
             fresh = now - h.get("last", 0) <= window
             rep = h.get("role") in REPEATER_ROLES
             label = h.get("name", nid) + (" [R]" if rep else "") + ("" if fresh else f" ({ago(h.get('last'))})")
@@ -2127,6 +2699,7 @@ class App:
             self.map_fitted = True
         if self.map_idx < 0:
             self.update_cycle_label()
+        self.sync_dest()  # online refreshes add pins without a radio refresh
 
     def cycle_list(self):
         # newest-heard first; "Nodes" = everything that isn't a repeater
@@ -2305,15 +2878,73 @@ class App:
             tk.Button(bar, text="Copy location", command=copy, **btn).pack(side="left")
             tk.Button(bar, text="Google Maps", **btn, command=lambda: webbrowser.open(
                 f"https://www.google.com/maps?q={pos[0]:.6f},{pos[1]:.6f}")).pack(side="left", padx=6)
-        match = [v for v in self.dest["values"] if v.endswith(f"[{nid}]")]
-        if match:
+        self.card_chat = None
+        if nid != getattr(self, "last_me", (None,))[0] and re.fullmatch(r"![0-9a-f]{8}", nid or ""):
             def message():
-                self.dest.set(match[0])
-                win.destroy()
-                self.entry.focus_set()
-            tk.Button(bar, text="Message", command=message, **btn).pack(side="left")
+                if self.card_chat:
+                    self.card_entry.focus_force()
+                else:
+                    self.open_card_chat(win, bar, nid, title)
+            tk.Button(bar, text="Message", command=message, bg=ACCENT, fg="#000", relief="flat",
+                      font=("Segoe UI", 9)).pack(side="left", padx=(6, 0))
         tk.Button(bar, text="Close", command=win.destroy, **btn).pack(side="right")
         win.bind("<Escape>", lambda e: win.destroy())
+
+    def open_card_chat(self, win, bar, nid, name):
+        """Message panel inside a node card: the conversation with that node, plus a box to send it a DM."""
+        self.set_dest(nid)  # the main message bar follows too, so you can reply from either place
+        name = self.dest_names.get(nid, name)
+        frame = tk.Frame(win, bg=BG)
+        frame.pack(fill="both", expand=True, padx=8, pady=(8, 0), before=bar)
+        tk.Label(frame, text=f"MESSAGES WITH {name.upper()}"[:60], fg=DIM, bg=BG,
+                 font=("Segoe UI", 8, "bold")).pack(anchor="w")
+        txt = tk.Text(frame, bg=PANEL, fg=FG, relief="flat", wrap="word", font=("Segoe UI", 9),
+                      height=7, width=56, state="disabled", padx=6, pady=4)
+        for tag, colour in (("time", DIM), ("who", ACCENT), ("dm", WARN), ("me", GOOD)):
+            txt.tag_configure(tag, foreground=colour)
+        txt.pack(fill="both", expand=True)
+        row = tk.Frame(frame, bg=BG)
+        row.pack(fill="x", pady=(6, 0))
+        entry = self.card_entry = tk.Entry(row, bg=PANEL, fg=FG, insertbackground=FG, relief="flat")
+        entry.pack(side="left", fill="x", expand=True, ipady=3)
+
+        def send(event=None):
+            if self.send_text(entry.get().strip(), nid, name):
+                entry.delete(0, "end")
+        entry.bind("<Return>", send)
+        tk.Button(row, text="Send", command=send, bg=ACCENT, fg="#000", relief="flat").pack(side="left", padx=(6, 0))
+        if not self.has_key(nid):
+            asked = self.request_key(nid)
+            tk.Label(frame, text="Your radio doesn't have this node's encryption key yet, so a direct message "
+                                 "will be refused. " + ("Asking the node for it now; " if asked else "")
+                                 + "it shows up once the node replies.",
+                     fg=WARN, bg=BG, font=("Segoe UI", 8), wraplength=380, justify="left").pack(anchor="w", pady=(4, 0))
+        # earlier conversation, from the message log
+        try:
+            with open(LOG_PATH, encoding="utf-8") as f:
+                lines = f.readlines()[-2000:]
+        except OSError:
+            lines = []
+        past = []
+        for line in lines:
+            try:
+                m = json.loads(line)
+            except ValueError:
+                continue
+            if isinstance(m, dict) and "text" in m and "t" in m and self.with_node(m, nid, name):
+                past.append(m)
+        for m in past[-30:]:
+            self.chat_line(txt, m)
+        if not past:
+            self.chat_note(txt, "No messages yet.", ("time", "placeholder"))
+        self.card_chat = (txt, nid, name)
+
+        def closed(event):
+            if event.widget is win:
+                self.card_chat = None
+        win.bind("<Destroy>", closed, add="+")
+        win.lift()
+        entry.focus_force()
 
     def refresh_online(self):
         self.online_busy = True
@@ -2337,15 +2968,32 @@ class App:
         threading.Thread(target=work, daemon=True).start()
 
     def toggle_online(self):
-        self.cfg["online_nodes"] = not self.cfg.get("online_nodes", True)
+        self.cfg["online_nodes"] = bool(self.online_var.get())
         save_cfg(self.cfg)
-        self.online_btn.config(text=self.online_btn_text())
         if self.cfg["online_nodes"]:
             self.online_last = 0  # fetch straight away
         self.update_map()
 
-    def online_btn_text(self):
-        return "Online: on" if self.cfg.get("online_nodes", True) else "Online: off"
+    def seen_label(self):
+        """Label of the map's chosen node filter; anything unknown falls back to all recorded nodes."""
+        v = self.cfg.get("map_seen")
+        return next((label for k, label in MAP_SEEN if k == v), MAP_SEEN[-1][1])
+
+    def seen_span(self, window):
+        """Seconds back a heard node may be and still get a pin (None = no limit)."""
+        v = self.cfg.get("map_seen")
+        if v == "now":
+            return window
+        return v if isinstance(v, int) and v > 0 else None
+
+    def set_map_seen(self, key):
+        self.cfg["map_seen"] = key
+        save_cfg(self.cfg)
+        self.seen_box.set(self.seen_label())
+        self.map_idx = -1
+        self.update_map()
+        if self.map_idx < 0:
+            self.update_cycle_label()
 
     def sync_zoom_slider(self, zoom):
         if hasattr(self, "zoom_var") and self.zoom_var.get() != zoom:
@@ -2398,6 +3046,39 @@ class App:
         self.map.fit_bounding_box((max(lats) + pad, min(lons) - pad), (min(lats) - pad, max(lons) + pad))
 
     # ---------- drone track ----------
+    def show_banner(self, text):
+        """Red DRONE DETECTED banner under the top buttons; it stays while pings keep coming and
+        hides itself DRONE_BANNER_SECS after the last one (or when dismissed)."""
+        mt = DRONE_RE.search(text or "")
+        if not self.banner.winfo_ismapped():
+            self.banner_pings = 0
+            self.banner.pack(fill="x", padx=8, pady=(0, 6), after=self.top_bar)
+        self.banner_pings += 1
+        detail = ""
+        if mt:
+            vendor = oui_vendor(mt.group(1))
+            detail = f"   {vendor + ' · ' if vendor else ''}{mt.group(1)}   RSSI {mt.group(2)} dBm"
+        when = datetime.datetime.now().strftime("%H:%M:%S")
+        pings = f"{self.banner_pings} ping{'s' if self.banner_pings != 1 else ''}"
+        self.banner_lbl.config(text=f"⚠ DRONE DETECTED{detail}   ·   {pings}, last {when}")
+        if self.banner_job:
+            self.root.after_cancel(self.banner_job)
+        self.banner_job = self.root.after(DRONE_BANNER_SECS * 1000, self.hide_banner)
+
+    def hide_banner(self):
+        if self.banner_job:
+            try:
+                self.root.after_cancel(self.banner_job)
+            except tk.TclError:
+                pass
+            self.banner_job = None
+        self.banner.pack_forget()
+
+    def banner_to_map(self):
+        if getattr(self, "drone_tab", None) is not None:
+            self.tabs.select(self.drone_tab)
+            self.root.after(300, lambda: self.dmap and self.fit_track())
+
     def add_drone_point(self, text, t=None, redraw=True):
         """Parse a drone alert and append its GPS to the flight track. No-op when
         the text isn't a drone alert, so it's safe to call on every message."""
@@ -2563,30 +3244,77 @@ class App:
     def pick_dest(self, event=None):
         # clicking a node in either list sets it as the reply target
         sel = event.widget.selection() if event else self.tree.selection()
-        match = [v for v in self.dest["values"] if sel and v.endswith(f"[{sel[0]}]")]
-        self.dest.set(match[0] if match else "Everyone")
-        self.entry.focus_set()
+        if sel and sel[0] != getattr(self, "last_me", (None,))[0] and re.fullmatch(r"![0-9a-f]{8}", sel[0]):
+            self.set_dest(sel[0])
+        else:
+            self.dest.set("Everyone")
+            self.entry.focus_set()
 
     def send(self):
         text = self.entry.get().strip()
-        if not text or not self.iface:
-            return
         dest = self.dest.get()
         node_id = dest.rsplit("[", 1)[1].rstrip("]") if "[" in dest else "^all"
+        if self.send_text(text, node_id):
+            self.entry.delete(0, "end")
+
+    def send_text(self, text, node_id, name=None, channel=0):
+        """Send a channel message (node_id "^all") or a direct message. True once it's handed to the radio."""
+        if not text:
+            return False
+        if not self.iface:
+            self.set_status("Not connected: message not sent", BAD)
+            return False
         try:
-            pkt = self.iface.sendText(text, destinationId=node_id, wantAck=node_id != "^all")
+            pkt = self.iface.sendText(text, destinationId=node_id, wantAck=node_id != "^all",
+                                      channelIndex=channel)
         except Exception as e:
             log.error("Sending to %s failed", node_id, exc_info=True)
             self.set_status(f"Send failed: {e}"[:60], BAD)
-            return
+            return False
         m = {"id": getattr(pkt, "id", None), "t": time.time(), "mine": True,
-             "from": "Me", "to": "Everyone" if node_id == "^all" else dest.rsplit(" [", 1)[0],
-             "text": text}
+             "from": "Me", "to": "Everyone" if node_id == "^all" else (name or self.dest_names.get(node_id, node_id)),
+             "text": text, "tid": None if node_id == "^all" else node_id,
+             "ch": self.channel_name(channel) if node_id == "^all" else None}
+        if node_id != "^all" and not self.has_key(node_id):
+            # firmware 2.5+ refuses a direct message without the node's public key: go and fetch it
+            self.request_key(node_id)
+            self.set_status(f"No key for {m['to']} yet: asked for it"[:70], WARN)
         self.log_msg(m)
         self.add_msg(m, notify=False)
         if node_id != "^all" and m["id"]:
             self.pending[m["id"]] = (m["to"], time.time())
-        self.entry.delete(0, "end")
+            self.pending_nid[m["id"]] = node_id
+            if len(self.pending_nid) > 500:
+                self.pending_nid = {k: v for k, v in self.pending_nid.items() if k in self.pending}
+        return True
+
+    def has_key(self, nid):
+        n = (getattr(self.iface, "nodes", None) or {}).get(nid) or {}
+        return bool(n.get("user", {}).get("publicKey"))
+
+    def request_key(self, nid, force=False):
+        """Ask one node for its node info, which carries its public key; direct messages need that key.
+        At most once a minute per node, on a short-lived thread so the UI never waits on the radio."""
+        iface = self.iface
+        if not iface or (not force and self.has_key(nid)):
+            return False
+        if time.time() - self.key_asked.get(nid, 0) < 60:
+            return False
+        self.key_asked[nid] = time.time()
+
+        def work():
+            try:
+                from meshtastic import portnums_pb2, mesh_pb2
+                uu = (iface.getMyNodeInfo() or {}).get("user", {}) or {}
+                me = mesh_pb2.User(id=uu.get("id", ""), long_name=uu.get("longName", ""),
+                                   short_name=uu.get("shortName", ""))
+                iface.sendData(me, destinationId=nid, portNum=portnums_pb2.PortNum.NODEINFO_APP,
+                               wantResponse=True, channelIndex=0)
+                log.info("Asked %s for its node info (public key)", nid)
+            except Exception as e:
+                warn_once("keyreq", "Key request failed: %s", e)
+        threading.Thread(target=work, daemon=True, name="keyreq").start()
+        return True
 
     # ---------- controls ----------
     def toggle_pause(self):
@@ -2695,8 +3423,22 @@ class App:
             ttk.Combobox(win, textvariable=cadence, state="readonly", width=22,
                          values=list(cad_map)))
 
+        keep_now = self.archive_days()
+        keep_map = dict(ARCHIVE_CHOICES)
+        keep_label = next((l for l, d in ARCHIVE_CHOICES if d == keep_now), None)
+        if keep_label is None:
+            keep_label = f"{keep_now} days"
+            keep_map[keep_label] = keep_now
+        keep = tk.StringVar(value=keep_label)
+        row(11, "Keep chat archive", ttk.Combobox(win, textvariable=keep, state="readonly", width=22,
+                                                  values=list(keep_map)))
+
         def apply():
             before = (self.cfg["mode"], self.cfg["port"], self.cfg["host"])
+            new_keep = keep_map.get(keep.get(), keep_now)
+            if new_keep != keep_now:
+                self.cfg["archive_days"] = new_keep
+                self.archive_trimmed = 0  # apply a shorter keep time on the next tick
             try:
                 self.cfg["active_mins"] = max(1, int(active_mins.get()))
             except ValueError:
@@ -2749,7 +3491,7 @@ class App:
                 self.set_status("Settings saved — reconnecting…", WARN)
 
         tk.Button(win, text="Save", command=apply, bg=ACCENT, fg="#000", relief="flat",
-                  width=10).grid(row=11, column=1, sticky="e", padx=10, pady=10)
+                  width=10).grid(row=12, column=1, sticky="e", padx=10, pady=10)
         snd_box.bind("<<ComboboxSelected>>", lambda e: test())  # preview on pick
         win.protocol("WM_DELETE_WINDOW", apply)  # closing with X keeps changes too
 

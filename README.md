@@ -53,6 +53,19 @@ flight path, alongside the pilot's location and the manufacturer resolved from t
   heard.
 - **Map** — your radio's nodes and, if you want them, internet nodes from meshmap.net, in dark or
   satellite styles, with a tile engine that is easy on memory and data and sleeps when off-screen.
+  A dropdown on the map lets you pick what you see: just the nodes that are active right now, the
+  ones heard in the last hour, day or month, or every node you've ever recorded. A checkbox shows
+  or hides the purple internet-map nodes, and **Clear map history** wipes the slate clean.
+- **Message any node on the map** — click a pin and hit **Message**. A chat opens right there on
+  the node's card, with your conversation so far and a box to reply in.
+- **Three message panels** — direct messages, drone alerts and channel traffic each get their own
+  panel along the bottom. Pop any of them out into its own window, with everything you need to
+  reply from there.
+- **Drone alert banner** — a red **DRONE DETECTED** bar drops in under the top buttons the moment
+  a drone shows up, telling you who made it, how strong the signal is and how many pings you've had.
+  One click takes you to it on the map.
+- **Chat archive** — every message is kept for as long as you choose (a week up to forever), and
+  you can search and scroll back through all of it whenever you like.
 - **Drone tab** — live flight-path tracking from Remote ID alerts: the drone's path, a pilot
   marker, the manufacturer resolved from the MAC, and a running "pings · manufacturer · RSSI"
   readout.
@@ -64,6 +77,9 @@ flight path, alongside the pilot's location and the manufacturer resolved from t
   else's traffic. Change how often it runs, or turn it off, in Settings. The **Search** button does a
   bigger sweep whenever you want one.
 - **Messaging** — send and receive mesh text, with delivery reports.
+- **Light on your PC** — it's a widget, so it's built to sit quietly in the corner: about 100 MB
+  of memory and well under 1% CPU on a normal mesh. The archive isn't even opened until you go
+  looking through it.
 - **Phone push** (optional) — forward alerts to your phone through ntfy.
 - Runs minimised to the **system tray**, allows only a single instance, and recovers cleanly when a
   radio is unplugged and plugged back in.
@@ -98,6 +114,43 @@ are never sent over the mesh.
 4. **Fit path** frames the whole flight, **Save flight** writes the CSV and a map snapshot to the
    `flights` folder, and **Clear** resets the track.
 
+## Messaging
+
+**The three panels.** Along the bottom of the window you'll find:
+
+- **Direct messages** — private chats between you and other nodes, plus delivery reports, so you
+  know whether a message actually got there.
+- **Drone detect** — a tidy list of drone alerts: who made the drone, the signal strength, and
+  where the drone and its pilot are.
+- **Channel traffic** — every public message on the channels your radio is on.
+
+Drag the gaps between them to make one bigger. Click **Open in window ↗** on any panel to give it a
+window of its own. It keeps updating live and has its own controls: pick who to message in the
+direct-message window, pick a channel in the channel window, or jump to the map from the drone
+window.
+
+**Messaging a node.** Click any pin on the map (or any name in the lists), then **Message**. You'll
+get a little chat right on the node's card. You can also pick anyone from the **Message to**
+dropdown at the bottom; it lists every node on the map, with the ones your radio knows at the top.
+
+**"Your radio doesn't have this node's encryption key yet."** Meshtastic encrypts direct messages
+end to end, so your radio needs the other node's public key before it can send one. It picks up
+keys automatically as it hears other nodes. If it doesn't have one yet, Central Finite Curve asks
+that node for it and lets you know. Give it a moment to reply, then send again.
+
+**What you can't see.** Your radio relays plenty of traffic it can't read: other people's private
+messages, and channels you don't have the key for. That's how Meshtastic's encryption is meant to
+work, so the Channel traffic panel only shows what your radio can actually decrypt.
+
+**The archive.** Click **Archive** (next to Clear) to search and scroll back through old messages.
+You can narrow it down by type (direct, drone or channel) and by time. Choose how long messages
+are kept in **Settings → Keep chat archive**. **Clear** only tidies up the panels; your messages
+stay in the archive until you hit **Clear archive** in the archive window.
+
+**Right-click any message** to archive just that one, or your whole conversation with that node,
+out of the panels. It's still in the archive if you need it, and anything new from them shows up as
+normal.
+
 ## Is this a fork?
 
 No. Central Finite Curve is an original, standalone project, not a fork of anything. It is designed
@@ -123,8 +176,8 @@ original author. See [LICENSE](LICENSE) for the full text.
 
 ## Known issues (alpha)
 
-- Two of the heavier GUI timing tests (`test_demo_session` and `test_busy_city_scale`) are currently
-  flaky and under investigation; the core functionality tests pass.
+- Direct messages to a node your radio has never heard won't go through until that node answers
+  the key request (see Messaging above). Nodes that are out of range will never answer.
 - The map uses online tiles, so keep the providers' terms in mind, along with your data plan on
   cellular connections.
 - Tray and sound behaviour varies a little between operating systems.

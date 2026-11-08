@@ -1,7 +1,7 @@
 ; Inno Setup script for Central Finite Curve (Windows installer).
 ; Build:  ISCC.exe installer\CentralFiniteCurve.iss
 ; Override version / source at build time, e.g.:
-;   ISCC.exe /DMyAppVersion=0.1.0-alpha /DSourceDir=..\dist\CentralFiniteCurve installer\CentralFiniteCurve.iss
+;   ISCC.exe /DMyAppVersion=0.3.0-alpha /DSourceDir=..\dist\CentralFiniteCurve installer\CentralFiniteCurve.iss
 ; publish.ps1 passes these automatically.
 
 #define MyAppName "Central Finite Curve"
@@ -10,7 +10,7 @@
 #define MyAppURL "https://github.com/DaGromflomite/Central-Finite-Curve"
 
 #ifndef MyAppVersion
-  #define MyAppVersion "0.1.0-alpha"
+  #define MyAppVersion "0.3.0-alpha"
 #endif
 ; Folder produced by PyInstaller (onedir). Relative to this .iss file by default.
 #ifndef SourceDir

@@ -1,5 +1,39 @@
 # Changelog
 
+## 0.3.0-alpha — 2026-11-07
+
+Messaging, drone alerts and the map, reworked.
+
+- **Message any node on the map.** Every node card (click a pin, or the name in the bar under the
+  map) has a **Message** button. It opens a message panel on the card itself: your conversation with
+  that node, a box to type in, and delivery reports. The main **Message to** list follows the card. The
+  list holds every node on the map: nodes your radio knows (newest first), then nodes heard before,
+  then internet-map nodes marked *(internet)*. The chosen recipient stays put through refreshes.
+- **Missing encryption keys are handled.** Firmware 2.5+ refuses a direct message
+  (`PKI_SEND_FAIL_PUBLIC_KEY`) until your radio has the other node's public key. The widget now says
+  so in plain words and asks that node for its node info (which carries the key), at most once a
+  minute per node. Opening a card's message panel asks up front if the key is missing.
+- **Three message panels.** Direct messages, Drone detect (a compact drone/pilot position list) and
+  Channel traffic (every public message on the channels your radio shares). Drag the gaps to resize.
+  **Open in window ↗** pops any panel into its own window that keeps updating, with the right send
+  controls: a recipient picker for direct messages, a channel picker for channel traffic, and
+  *Show on map* plus sending on the drone channel for Drone detect.
+- **Red DRONE DETECTED banner** under the top buttons when a drone alert comes in: the maker (from the
+  MAC), the MAC, RSSI and a ping count, plus *Show on map* and *Dismiss*. It hides itself 5 minutes
+  after the last ping.
+- **Chat archive.** The **Archive** button (next to Clear) opens a searchable, scrollable window of
+  old messages, filtered by type (direct, drone, channel) and time (today, 7 days, 30 days,
+  everything), with **Clear archive** to delete it all. *Settings → Keep chat archive* sets how long
+  messages are kept: 1 week, 1 month, 3 months (the default), 1 year or forever, with a hard cap of
+  100,000 messages. **Clear** now only empties the panels; the messages stay in the archive.
+  **Right-click** any message to archive that message, or the whole conversation with that node, out
+  of the panels. New messages from that node still show. The archive costs nothing while it's closed:
+  the file is only read when you search, and it's trimmed once a day.
+- **Map: choose which nodes to show.** A dropdown on the map: *Nodes currently active*, *active in the
+  last hour / day / month*, or *All recorded nodes*. "Currently active" removes the grey pins.
+  The old "Online: on/off" button is now a checkbox, **Show internet-map nodes (purple)**.
+  **Clear map history** removes recorded nodes, and keeps a backup.
+
 ## 0.2.0-alpha — 2026-11-07
 
 - **Search is now a real mesh discovery, not just a hub ping.** Alongside nudging the nodes the

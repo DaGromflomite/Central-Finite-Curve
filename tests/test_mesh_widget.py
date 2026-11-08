@@ -178,6 +178,25 @@ class Files(unittest.TestCase):
         self.assertEqual(lines[-1], "2999\n")
         self.assertEqual(mw.trim_lines(p, 2000), 0)  # under the limit: untouched
 
+    def test_trim_archive(self):
+        p = self.path("a.jsonl")
+        now = time.time()
+        with open(p, "w", encoding="utf-8") as f:
+            for days in (40, 35, 20, 5, 1):
+                f.write(json.dumps({"t": now - days * 86400, "text": f"{days}d"}) + "\n")
+        self.assertEqual(mw.trim_archive(p, 30, now=now), 2)  # 40 and 35 days old go
+        self.assertEqual(mw.trim_archive(p, 30, now=now), 0)  # nothing more to do: file untouched
+        self.assertEqual(mw.trim_archive(p, 0, cap=2, now=now), 1)  # "forever" still obeys the cap
+        with open(p, encoding="utf-8") as f:
+            self.assertEqual([json.loads(l)["text"] for l in f], ["5d", "1d"])
+
+    def test_tail_lines(self):
+        p = self.path("t.jsonl")
+        with open(p, "w", encoding="utf-8") as f:
+            f.writelines(f"line {i}\n" for i in range(50000))
+        self.assertEqual(mw.tail_lines(p, 3, chunk=4096), ["line 49997", "line 49998", "line 49999"])
+        self.assertEqual(mw.tail_lines(self.path("none.jsonl"), 3), [])
+
     def test_prune_history(self):
         now = time.time()
         h = {"!old": {"last": now - 400 * 86400}, "!new": {"last": now}, "!none": {}}
@@ -633,6 +652,140 @@ class Gui(unittest.TestCase):
             root.update()
             r["stale_listed"] = app.tree.exists("!05a1e000") and app.tree.item("!05a1e000")["values"][-1] == "1h"
             del app.iface.nodes["!05a1e000"]
+            # every pin on the map can be messaged, even ones the radio doesn't know (internet-map nodes)
+            lat, lon = app.home() or (41.94, -79.98)
+            app.online["!0e7e7e7e"] = {"name": "Web Only", "lat": lat + 0.05, "lon": lon + 0.05, "acc": 0,
+                                       "role": "CLIENT", "seen": now - 600}
+            app.update_map()
+            root.update()
+            listed = [v for v in app.dest["values"] if v.endswith("[!0e7e7e7e]")]
+            r["online_in_dest"] = bool(listed) and "(internet)" in listed[0]
+            r["all_pins_in_dest"] = [n for n in app.map_points if n != app.last_me[0]
+                                     and not any(v.endswith(f"[{n}]") for v in app.dest["values"])]
+            app.show_node_info("!0e7e7e7e")
+            root.update()
+            msg_btn = [b for b in app.info_win.winfo_children()[1].winfo_children()
+                       if b.winfo_class() == "Button" and b["text"] == "Message"]
+            r["card_has_message"] = bool(msg_btn)
+            if msg_btn:
+                msg_btn[0].invoke()  # opens a message panel on the card itself
+            root.update()
+            r["card_chat"] = app.card_chat is not None and app.card_chat[1] == "!0e7e7e7e"
+            app.refresh()  # a refresh mustn't swap the chosen recipient back to Everyone
+            root.update()
+            r["dest_kept"] = app.dest.get().endswith("[!0e7e7e7e]")
+            if r["card_chat"]:
+                app.card_entry.insert(0, "hello web node")
+                app.card_entry.event_generate("<Return>")
+                root.update()
+                r["card_shows_sent"] = "hello web node" in app.card_chat[0].get("1.0", "end")
+            r["sent_to"] = app.msgs.get("1.0", "end")
+            # the radio refuses a DM it has no key for: we must say so plainly and ask the node for its key
+            pid = next((k for k, v in app.pending_nid.items() if v == "!0e7e7e7e"), None)
+            app.key_asked.pop("!0e7e7e7e", None)
+            if pid:
+                app.handle_packet({"fromId": app.last_me[0], "decoded": {
+                    "portnum": "ROUTING_APP", "requestId": pid,
+                    "routing": {"errorReason": "PKI_SEND_FAIL_PUBLIC_KEY"}}}, app.iface)
+            r["pki_explained"] = "encryption key" in app.msgs.get("1.0", "end")
+            r["pki_key_asked"] = "!0e7e7e7e" in app.key_asked
+            app.info_win.destroy()
+            root.update()
+            r["chat_cleared"] = app.card_chat is None
+            del app.online["!0e7e7e7e"]
+            app.dest.set("Everyone")
+            # map Show: "Now" drops grey (not-active) pins, History time frames bring them back
+            app.history["!01d0ffee"] = {"first": now - 7 * 86400, "last": now - 2 * 86400, "count": 1,
+                                        "name": "Two Days Ago", "lat": lat - 0.03, "lon": lon - 0.03}
+            app.set_map_seen("now")
+            r["now_hides_old"] = "!01d0ffee" not in app.map_points
+            app.set_map_seen(86400)
+            r["day_hides_old"] = "!01d0ffee" not in app.map_points
+            app.set_map_seen(30 * 86400)
+            r["month_shows_old"] = "!01d0ffee" in app.map_points
+            app.set_map_seen(None)
+            r["all_shows_old"] = "!01d0ffee" in app.map_points
+            del app.history["!01d0ffee"]
+            # Clear map history: old recorded nodes go, nodes the radio still lists come back
+            app.history["!01d0ffee"] = {"first": now - 9e5, "last": now - 8e5, "count": 1, "name": "Old"}
+            real_ask = mw.messagebox.askyesno
+            mw.messagebox.askyesno = lambda *a, **k: True
+            try:
+                app.clear_map_history()
+            finally:
+                mw.messagebox.askyesno = real_ask
+            root.update()
+            r["history_cleared"] = "!01d0ffee" not in app.history and "!01d0ffee" not in app.map_points
+            r["radio_nodes_back"] = len(app.history) > 0
+            # three message panels; each pops out into a window with its own send controls
+            alert = ("Drone: 60:60:1f:00:00:01 RSSI:-71 https://maps.google.com/?q=41.95,-79.97\r\n"
+                     "Pilot: https://maps.google.com/?q=41.94,-79.98\r\n")
+            app.handle_packet({"fromId": "!02ed677c", "id": 4242, "to": 0xFFFFFFFF, "channel": 0,
+                               "decoded": {"portnum": "TEXT_MESSAGE_APP", "text": alert}}, app.iface)
+            root.update()
+            r["banner"] = app.banner.winfo_ismapped() and "DRONE DETECTED" in app.banner_lbl["text"]
+            r["drone_panel"] = "60:60:1f:00:00:01" in app.panels["drone"]["texts"][0].get("1.0", "end")
+            r["drone_not_chan"] = "60:60:1f" not in app.panels["chan"]["texts"][0].get("1.0", "end")
+            app.hide_banner()
+            root.update()
+            r["banner_hidden"] = not app.banner.winfo_ismapped()
+            controls = {}
+            for k in ("dm", "drone", "chan"):
+                app.pop_panel(k)
+                root.update()
+                bar = app.panels[k]["win"].winfo_children()[-1]
+                controls[k] = sorted(c.winfo_class() for c in bar.winfo_children())
+            r["pop_controls"] = controls
+            bar = app.panels["chan"]["win"].winfo_children()[-1]
+            entry = [c for c in bar.winfo_children() if c.winfo_class() == "Entry"][0]
+            entry.insert(0, "hello channel from popout")
+            entry.event_generate("<Return>")
+            root.update()
+            r["pop_sent"] = "hello channel from popout" in app.panels["chan"]["texts"][0].get("1.0", "end")
+            for k in ("dm", "drone", "chan"):
+                app.panels[k]["win"].destroy()
+            # right-click archiving: one message, or a whole conversation, leaves the panels
+            chan_txt = app.panels["chan"]["texts"][0]
+            m = next(v for v in app.line_msgs.values() if v.get("text") == "hello channel from popout")
+            app.archive_msgs(msg=m)
+            root.update()
+            r["line_archived"] = "hello channel from popout" not in chan_txt.get("1.0", "end")
+            dm_txt = app.panels["dm"]["texts"][0]
+            chatty = next((v for v in app.line_msgs.values() if v.get("from") == "Chatty Cathy"
+                           or v.get("to") == "Chatty Cathy"), None)
+            if chatty:
+                app.archive_msgs(peer=app.msg_peer(chatty)[0])
+                root.update()
+                shown = dm_txt.get("1.0", "end")
+                r["convo_archived"] = "Chatty Cathy:" not in shown and "→ Chatty Cathy:" not in shown
+            else:
+                r["convo_archived"] = True  # nothing from Chatty in this run
+            app.add_msg({"id": 777001, "t": time.time() + 1, "from": "Chatty Cathy", "to": "Me",
+                         "fid": chatty and chatty.get("fid") or chatty and chatty.get("tid"),
+                         "tid": "!me", "text": "new after archive"}, False)
+            root.update()
+            r["new_still_shows"] = "new after archive" in dm_txt.get("1.0", "end")
+            # chat archive: finds old messages by text and kind, and Clear keeps them archived
+            real_ask = mw.messagebox.askyesno
+            mw.messagebox.askyesno = lambda *a, **k: True
+            try:
+                app.clear_messages()
+            finally:
+                mw.messagebox.askyesno = real_ask
+            r["panels_cleared"] = "hello channel from popout" not in app.panels["chan"]["texts"][0].get("1.0", "end")
+            app.open_archive()
+            root.update()
+            aw = app.archive_win
+            bar = aw.winfo_children()[0]
+            query = [c for c in bar.winfo_children() if c.winfo_class() == "Entry"][0]
+            query.insert(0, "popout")
+            [c for c in bar.winfo_children() if c.winfo_class() == "Button" and c["text"] == "Search"][0].invoke()
+            root.update()
+            text = [c for c in aw.winfo_children() if c.winfo_class() == "Text"][0].get("1.0", "end")
+            r["archive_finds"] = "hello channel from popout" in text and "60:60:1f" not in text
+            aw.destroy()
+            app.clear_archive()
+            r["archive_empty"] = os.path.getsize(mw.LOG_PATH) == 0
 
         def lose_radio(app, root, r):
             r["delivered"] = "delivered to Chatty" in app.msgs.get("1.0", "end") or \
@@ -653,6 +806,35 @@ class Gui(unittest.TestCase):
         self.assertTrue(r["untimed_listed"], "a node with no timestamp was hidden from the Active list")
         self.assertTrue(r["untimed_mapped"], "a node with no timestamp was left off the map")
         self.assertTrue(r["stale_listed"], "a node we heard an hour ago was hidden because the radio's time was stale")
+        self.assertTrue(r["online_in_dest"], "an internet-map node was missing from Message-to")
+        self.assertEqual(r["all_pins_in_dest"], [], "map pins missing from Message-to")
+        self.assertTrue(r["card_has_message"], "node card had no Message button")
+        self.assertTrue(r["dest_kept"], "a refresh reset the chosen recipient")
+        self.assertIn("Web Only", r["sent_to"])
+        self.assertTrue(r["card_chat"], "Message didn't open a message panel on the card")
+        self.assertTrue(r["pki_explained"], "a missing-key refusal wasn't explained")
+        self.assertTrue(r["pki_key_asked"], "a missing-key refusal didn't ask the node for its key")
+        self.assertTrue(r["history_cleared"], "Clear map history left old nodes behind")
+        self.assertTrue(r["banner"], "no red banner for a drone alert")
+        self.assertTrue(r["banner_hidden"], "Dismiss didn't hide the banner")
+        self.assertTrue(r["drone_panel"] and r["drone_not_chan"], "drone alert went to the wrong panel")
+        for k, classes in r["pop_controls"].items():
+            self.assertIn("Entry", classes, f"{k} pop-out has no message box")
+            self.assertIn("Button", classes, f"{k} pop-out has no Send")
+        self.assertIn("TCombobox", r["pop_controls"]["dm"], "DM pop-out has no recipient picker")
+        self.assertIn("TCombobox", r["pop_controls"]["chan"], "channel pop-out has no channel picker")
+        self.assertTrue(r["pop_sent"], "sending from a pop-out window didn't land in its panel")
+        self.assertTrue(r["panels_cleared"], "Clear didn't clear the panels")
+        self.assertTrue(r["line_archived"], "Archive this message left it in the panel")
+        self.assertTrue(r["convo_archived"], "Archive conversation left messages in the panel")
+        self.assertTrue(r["new_still_shows"], "a new message after archiving a conversation was hidden")
+        self.assertTrue(r["archive_finds"], "the archive search didn't find a cleared message")
+        self.assertTrue(r["archive_empty"], "Clear archive left messages on disk")
+        self.assertTrue(r["radio_nodes_back"], "nodes the radio still knows didn't come back after clearing")
+        self.assertTrue(r.get("card_shows_sent"), "a message sent from the card didn't show on it")
+        self.assertTrue(r["chat_cleared"], "closing the card left its chat hooked up")
+        self.assertTrue(r["now_hides_old"] and r["day_hides_old"], "map Show filter kept old pins")
+        self.assertTrue(r["month_shows_old"] and r["all_shows_old"], "map History filter hid a node")
         self.assertTrue(r["reconnected"], "did not reconnect after the radio dropped")
         self.assertGreater(r["pins"], 15)
 
