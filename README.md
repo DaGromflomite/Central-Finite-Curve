@@ -248,6 +248,10 @@ message to Everyone.
 | **Home location** | Where your node sits on the map if it has no GPS. Paste "lat, lon" straight from Google Maps. It stays on your PC and is never sent over the mesh. | ✅ |
 | **Transient tracking** | How often it checks for nodes passing through: Off, Light (3 min, default), Active (1 min) or Real-time (20 s). These checks only reach radios right next to you and are never relayed, so they don't add traffic to the wider mesh. | ✅ |
 | **Keep chat archive** | How long messages are kept (see Chat archive). | 🧪 |
+| **Phone alerts: topic** | Your ntfy topic or link; **New private topic** makes a random one. Blank turns phone alerts off. | 🧪 |
+| **Phone alerts: Send to phone** | Drone alerts only, drone alerts + direct messages, or every message. | 🧪 |
+| **Phone alerts: Send test** | Sends a test notification so you know it works. | 🧪 |
+| **Send feedback…** (bottom left) | Opens the feedback form (see Feedback below). | 🧪 |
 
 ### System tray
 
@@ -255,6 +259,7 @@ message to Everyone.
 |---|---|---|
 | Tray icon | Its colour shows the connection status, it gets a marker when there are unread messages, and hovering over it shows the status and how many are new. Closing the window only hides it to the tray. | ✅ |
 | **Show / hide**, **Pause / resume**, **Settings**, **Clear messages** | Same as the buttons in the window. | ✅ |
+| **Send feedback** | Opens the feedback form. | 🧪 |
 | **Quit Central Finite Curve** | The only way to close it completely. Use this before updating. | ✅ |
 
 ### Behind the scenes
@@ -267,63 +272,68 @@ message to Everyone.
 | Moves the window back on screen if it was left on a monitor that's no longer plugged in. | ✅ |
 | Writes an error log to `mesh_widget.log` (kept small) to help track down problems. | ✅ |
 | **Demo mode:** start it with `--demo` (for example `CentralFiniteCurve.exe --demo`, or `python mesh_widget.pyw --demo`) for a pretend mesh full of tricky nodes, without touching your radio. | ✅ |
-| Phone alerts through ntfy (see below). | ✅ drone alerts / 🚧 other messages |
+| Phone alerts through ntfy (see below). | ✅ drone alerts / 🧪 messages and the Settings box |
 | macOS. | 🚧 Source only, never tested |
 
 ## Phone alerts with ntfy
 
-Central Finite Curve can send drone alerts to your phone through [ntfy](https://ntfy.sh), a free
+Central Finite Curve can send alerts to your phone through [ntfy](https://ntfy.sh), a free
 push-notification service. There's no account to make: you pick a private "topic" name, subscribe
 to it on your phone, and tell Central Finite Curve to post to it.
 
-**What gets sent:** right now, only messages on your drone channel (**DroneAlert** by default), which
-is where your Remote ID detector posts. While a drone is about, the alerts come thick and fast, so
-they're bundled together: you'll get at most one notification every 30 seconds, along the lines of
-"3 drone alerts", listing the first five. That keeps you well inside ntfy.sh's free daily limit.
-Pushing other messages (direct messages, or everything) is planned but not built yet. 🚧
+**Setting it up (about two minutes):**
 
-**1. Pick a topic name.** Anyone who knows the name can read your alerts, so make it long and hard to
-guess, like a password. For example: `cfc-drones-7f3k9q2xw81m`.
+1. **Install the ntfy app** on your phone (iPhone App Store or Google Play).
+2. In Central Finite Curve, open **Settings (⚙) → Phone alerts** and click **New private topic**.
+   It fills in a long, random topic name, something like `https://ntfy.sh/cfc-k7m2q9xw4hpr3tna`.
+   Anyone who knows the name can read your alerts, so treat it like a password. You can also type
+   your own topic name, or a link to your own ntfy server.
+3. In the ntfy app, tap **+** and enter the same topic name (the part after `ntfy.sh/`). Leave the
+   server as `ntfy.sh` unless you run your own.
+4. Back in Settings, click **Send test**. Your phone should buzz within a few seconds. If it says
+   "Didn't send", check your internet connection and the topic name.
+5. Choose what to send under **Send to phone**, then click **Save**.
 
-**2. Subscribe on your phone.** Install the **ntfy** app (iPhone App Store or Google Play), tap **+**,
-and enter your topic name. Leave the server as `ntfy.sh`.
+**What gets sent (Send to phone):**
 
-**3. Tell Central Finite Curve.** There isn't a Settings box for this yet, so you add it to the
-settings file by hand:
+| Choice | You'll get |
+|---|---|
+| **Drone alerts only** (default) | Every drone alert from your detector, marked urgent. |
+| **Drone alerts + direct messages** | The above, plus private messages sent to you. |
+| **Every message received** | The above, plus every public channel message. Can be chatty on a busy mesh. |
 
-1. Quit Central Finite Curve from the tray (**Quit Central Finite Curve**).
-2. Open `config.json` in Notepad. Where it is:
-   - **Installed version:** `%LOCALAPPDATA%\Programs\Central Finite Curve\_internal\config.json`
-     (paste that into the File Explorer address bar).
-   - **Running from source:** next to `mesh_widget.pyw`.
+While a drone is about, alerts come thick and fast, so they're bundled together: you'll get at
+most one notification every 30 seconds, like "3 drone alerts" or "1 drone alert + 2 messages",
+listing the first five. That keeps you well inside ntfy.sh's free daily limit. Drone alerts arrive
+as high priority; ordinary messages as normal priority.
 
-   The file is only created after the first run, so open and quit the app once if it's not there.
-3. Add a line with your topic, just after the opening `{`:
+**To turn it off,** clear the topic box in Settings and click Save.
 
-   ```json
-   "push_url": "https://ntfy.sh/cfc-drones-7f3k9q2xw81m",
-   ```
+**Troubleshooting:** if alerts show up in the widget but never on your phone, look in
+`mesh_widget.log` for a "Phone push failed" line; it says why. Your drone channel needs to be called
+**DroneAlert** for drone alerts to be recognised. If yours has another name, quit the app and add
+`"push_channel": "YourChannelName",` to `config.json` (installed version:
+`%LOCALAPPDATA%\Programs\Central Finite Curve\_internal\config.json`).
 
-   If your drone channel isn't called DroneAlert, add this line as well, with your channel's name:
+**Privacy:** alerts travel over the internet to the ntfy server, and drone alerts include the
+drone's and pilot's coordinates. Keep your topic name to yourself. It's saved only in `config.json`
+on your PC, which is never uploaded to this repository.
 
-   ```json
-   "push_channel": "YourChannelName",
-   ```
+## Feedback
 
-4. Save the file and start Central Finite Curve again.
+Found a bug, got an idea, or just want to say it worked? Open **Send feedback** from the tray menu
+or from the bottom of Settings.
 
-**4. Test it.** From any computer, open a command prompt and run
-`curl -d "test" https://ntfy.sh/cfc-drones-7f3k9q2xw81m` with your own topic name. Your phone should
-buzz. If it does, the phone side is set up. The next drone alert on the mesh will arrive the same
-way. If alerts reach the widget but not your phone, check `mesh_widget.log` for a "Phone push
-failed" line.
+1. Pick what it is (something's broken, an idea, or "it worked!"), give it a short title, and say
+   what happened.
+2. The form adds the useful details for you: app version, Windows version, radio model and
+   firmware, and how you're connected. There's a preview, so you see exactly what will be shared.
+3. If something broke, you can tick the box to include the last 40 lines of the error log. Names,
+   node IDs, coordinates, MAC addresses and links are removed before you ever see it.
+4. Click **Open on GitHub**. Your browser opens a new issue with everything filled in; check it over
+   and click **Submit**. Nothing is sent from the app itself.
 
-**Running your own ntfy server?** Just put its address in `push_url` instead, for example
-`https://ntfy.example.com/cfc-drones`.
-
-**Privacy:** alerts go over the internet to the ntfy server, and they include the drone's and
-pilot's coordinates. Keep the topic name to yourself, and don't put `config.json` anywhere public
-(it's already excluded from this repository).
+No GitHub account? Click **Copy report** and send it however suits you.
 
 ## Is this a fork?
 

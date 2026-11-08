@@ -1,5 +1,19 @@
 # Changelog
 
+## 0.4.0-alpha — 2026-11-07
+
+- **Phone alerts are now set up in Settings.** A new *Phone alerts (ntfy)* section has a topic box,
+  a **New private topic** button that makes a long random topic for you, and a **Send test**
+  button that tells you straight away whether it worked. No more editing `config.json` by hand.
+- **Choose what reaches your phone:** drone alerts only (the default, as before), drone alerts plus
+  direct messages, or every message received. Bursts are still bundled into at most one
+  notification every 30 seconds. Drone alerts are sent as high priority, other messages as normal.
+- **Send feedback.** A feedback form (tray menu, or the bottom of Settings) builds a GitHub issue
+  with the app version, Windows version, radio model and firmware filled in, and an optional
+  cleaned-up excerpt of the error log (names, node IDs, coordinates, MAC addresses and links
+  removed). It opens in your browser for you to check and submit; nothing is sent from the app.
+  **Copy report** is there for people without a GitHub account.
+
 ## 0.3.0-alpha — 2026-11-07
 
 Messaging, drone alerts and the map, reworked.

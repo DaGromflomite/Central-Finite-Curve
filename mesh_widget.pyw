@@ -69,7 +69,7 @@ def asset_path(name):
     """Path to a bundled asset (icons), working from source and from a PyInstaller build."""
     base = getattr(sys, "_MEIPASS", HERE)
     return os.path.join(base, "assets", name)
-VERSION = "0.3.0-alpha"
+VERSION = "0.4.0-alpha"
 HEALTH_SECS = 600   # how often a health line (memory, CPU, nodes) goes into the log
 DEMO = False        # --demo: made-up nodes instead of a radio, with its own files (see enable_demo)
 log = logging.getLogger("centralfinitecurve")
@@ -78,6 +78,9 @@ DEFAULTS = {"mode": "serial", "port": "COM16", "host": "", "on_top": False,
 RETRY_SECS = 10
 ACTIVE_MINS = 180  # a quiet node only announces itself every ~3 h, so a shorter window hides working nodes
 PUSH_GAP = 30  # seconds between phone pushes; alerts in between are merged into the next one
+# Settings -> Phone alerts -> "Send to phone": which incoming messages are pushed
+PUSH_MODES = (("drone", "Drone alerts only"), ("dm", "Drone alerts + direct messages"),
+              ("all", "Every message received"))
 CLOCK_SECS = 6 * 3600  # re-send the PC's time this often, so a radio with no GPS doesn't drift
 SEARCH_GAP = 12  # seconds between manual searches, so clicking repeatedly doesn't flood the mesh
 AUTO_SEARCH_SECS = 180  # how often the background discovery runs (0 = off). This is what makes the
@@ -368,6 +371,44 @@ def tail_lines(path, count, chunk=262144):
     return lines[-count:]
 
 
+def scrub_log(lines, names=()):
+    """Remove personal details from log lines before they're shared in a feedback report:
+    node IDs, node names, coordinates, MAC addresses, push links and the Windows user name."""
+    out = []
+    names = sorted({n for n in names if n and len(n) >= 3}, key=len, reverse=True)
+    for line in lines:
+        line = re.sub(r"https?://\S+", "<link>", line)
+        line = re.sub(r"![0-9a-fA-F]{8}", "!<node>", line)
+        line = re.sub(r"\b(?:[0-9a-fA-F]{2}:){5}[0-9a-fA-F]{2}\b", "<mac>", line)
+        line = re.sub(r"-?\d{1,3}\.\d{3,}", "<pos>", line)
+        line = re.sub(r"(?i)([a-z]:\\users\\)[^\\\s]+", r"\1<user>", line)
+        for n in names:
+            line = line.replace(n, "<name>")
+        out.append(line)
+    return out
+
+
+def feedback_link(title, body, limit=None):
+    """A GitHub 'new issue' link with the report filled in, shortened to fit if needed.
+    Returns (url, was_shortened)."""
+    import urllib.parse
+    limit = limit or FEEDBACK_URL_MAX
+    base = REPO_URL + "/issues/new?"
+    q = lambda b: base + urllib.parse.urlencode({"title": title, "body": b})
+    url = q(body)
+    if len(url) <= limit:
+        return url, False
+    note = "\n\n_(Report shortened to fit the link. Use **Copy report** in the app for the full text.)_"
+    lo, hi = 0, len(body)
+    while lo < hi:  # longest prefix that still fits
+        mid = (lo + hi + 1) // 2
+        if len(q(body[:mid] + note)) <= limit:
+            lo = mid
+        else:
+            hi = mid - 1
+    return q(body[:lo] + note), True
+
+
 def prune_history(history, now=None):
     """Forget nodes unheard for HISTORY_DAYS, then the oldest beyond MAX_HISTORY. Returns how many went."""
     now = now or time.time()
@@ -486,6 +527,9 @@ TILE_LOADERS = 4          # download threads (the library starts 25)
 PRECACHE_RINGS = 1        # extra rings of tiles fetched around the view (library: 8)
 DISK_CACHE_MB = 150       # downloaded tiles kept on disk so they aren't fetched twice
 DISK_CACHE_DAYS = 30      # then re-fetched, so map changes still come through
+REPO_URL = "https://github.com/DaGromflomite/Central-Finite-Curve"
+FEEDBACK_KINDS = (("Bug", "Something's broken"), ("Idea", "Idea or request"), ("Works", "It worked!"))
+FEEDBACK_URL_MAX = 7500  # GitHub refuses very long pre-filled issue links
 USER_AGENT = "CentralFiniteCurve/0.1 (+https://github.com/)"  # tile servers ask apps to identify themselves
 
 if tkintermapview:
@@ -784,14 +828,14 @@ class PhonePush:
 
     def __init__(self, url, send=None):
         self.url = url
-        self.waiting = []  # (time, sender, text)
+        self.waiting = []  # (time, sender, text, is_drone)
         self.last = 0
         self.lock = threading.Lock()
-        self.send = send or self.post
+        self.send = send  # for tests; None = post to ntfy
 
-    def add(self, sender, text):
+    def add(self, sender, text, drone=True):
         with self.lock:
-            self.waiting.append((time.time(), sender, text))
+            self.waiting.append((time.time(), sender, text, drone))
         self.flush()
 
     def flush(self, now=None):
@@ -800,22 +844,48 @@ class PhonePush:
             if not self.waiting or now - self.last < PUSH_GAP:
                 return
             batch, self.waiting, self.last = self.waiting, [], now
-        lines = [f"{datetime.datetime.fromtimestamp(t).strftime('%H:%M')} {who}: {text}" for t, who, text in batch[:5]]
+        lines = [f"{datetime.datetime.fromtimestamp(t).strftime('%H:%M')} {who}: {text}"
+                 for t, who, text, _ in batch[:5]]
         if len(batch) > 5:
             lines.append(f"(+{len(batch) - 5} more, see Central Finite Curve)")
-        title = "Drone alert" if len(batch) == 1 else f"{len(batch)} drone alerts"
-        threading.Thread(target=self.send, args=(title, "\n".join(lines)), daemon=True, name="push").start()
+        drones = sum(1 for *_, d in batch if d)
+        if drones == len(batch):
+            title = "Drone alert" if drones == 1 else f"{drones} drone alerts"
+        elif drones:
+            title = f"{drones} drone alert{'s' if drones != 1 else ''} + {len(batch) - drones} message" \
+                    + ("s" if len(batch) - drones != 1 else "")
+        else:
+            title = "New message" if len(batch) == 1 else f"{len(batch)} new messages"
+        body = "\n".join(lines)
+        if self.send:
+            threading.Thread(target=self.send, args=(title, body), daemon=True, name="push").start()
+        else:
+            threading.Thread(target=self.post, args=(title, body, bool(drones)), daemon=True, name="push").start()
 
-    def post(self, title, body):
-        req = urllib.request.Request(self.url, data=body.encode("utf-8"), method="POST",
-                                     headers={"Title": title, "Priority": "high", "Tags": "warning",
-                                              "User-Agent": "CentralFiniteCurve/1.0"})
+    def post(self, title, body, urgent=True):
+        """Send one notification. Returns (ok, message) so Settings can show the test result."""
+        headers = {"Title": title, "User-Agent": "CentralFiniteCurve/1.0"}
+        if urgent:
+            headers.update({"Priority": "high", "Tags": "warning"})
+        req = urllib.request.Request(self.url, data=body.encode("utf-8"), method="POST", headers=headers)
         try:
             with urllib.request.urlopen(req, timeout=20) as r:
                 r.read()
             log.info("Pushed '%s' to phone", title)
+            return True, "Sent"
         except Exception as e:
             warn_once("push", "Phone push failed: %s", e)
+            return False, str(e)
+
+
+def ntfy_url(text):
+    """Turn what the user typed into a push URL: a bare topic means the free ntfy.sh server."""
+    text = (text or "").strip()
+    if not text:
+        return ""
+    if not re.match(r"^https?://", text, re.I):
+        text = "https://ntfy.sh/" + text.lstrip("/")
+    return text if re.fullmatch(r"https?://[^\s/]+/[A-Za-z0-9_-]{1,64}", text) else None
 
 
 def play_alert(cfg):
@@ -1167,6 +1237,7 @@ class App:
             pystray.MenuItem("Pause / resume", act("pause")),
             pystray.MenuItem("Settings", act("settings")),
             pystray.MenuItem("Clear messages", act("clear")),
+            pystray.MenuItem("Send feedback", act("feedback")),
             pystray.Menu.SEPARATOR,
             pystray.MenuItem("Quit Central Finite Curve", act("quit")))
         self.tray = pystray.Icon("CentralFiniteCurve", tray_image(BAD, False), "Central Finite Curve", menu)
@@ -1191,6 +1262,9 @@ class App:
         elif action == "clear":
             self.show()
             self.clear_messages()
+        elif action == "feedback":
+            self.show()
+            self.open_feedback()
         elif action == "quit":
             self.quit()
 
@@ -1800,6 +1874,125 @@ class App:
             except (ValueError, TypeError, KeyError):
                 pass
 
+    def diagnostics(self):
+        """Facts that make a bug report useful. Nothing personal: no node IDs, names or places."""
+        info = [("App version", VERSION + (" (installed app)" if getattr(sys, "frozen", False) else " (from source)")),
+                ("Windows / OS", platform.platform()),
+                ("Python", platform.python_version()),
+                ("Connection", "Wi-Fi" if self.cfg.get("mode") == "wifi" else "USB")]
+        iface = self.iface
+        if iface:
+            try:
+                me = iface.getMyNodeInfo() or {}
+                info.append(("Radio", me.get("user", {}).get("hwModel", "unknown")))
+                fw = getattr(getattr(iface, "metadata", None), "firmware_version", None)
+                info.append(("Radio firmware", fw or "unknown"))
+                info.append(("Nodes in radio", str(len(iface.nodes or {}))))
+            except Exception:
+                info.append(("Radio", "couldn't read"))
+        else:
+            info.append(("Radio", "not connected"))
+        info.append(("Memory", f"{memory_mb():.0f} MB"))
+        info.append(("Phone alerts", "on" if self.cfg.get("push_url") else "off"))
+        return info
+
+    def open_feedback(self):
+        """Feedback form: builds a GitHub issue the person reviews and submits themselves.
+        Nothing is sent from the app; the browser opens with the report filled in."""
+        if getattr(self, "feedback_win", None) is not None and self.feedback_win.winfo_exists():
+            self.feedback_win.deiconify()
+            self.feedback_win.lift()
+            return
+        win = self.feedback_win = tk.Toplevel(self.root, bg=BG)
+        win.title("Send feedback - Central Finite Curve")
+        win.attributes("-topmost", self.cfg.get("on_top", False))
+        win.columnconfigure(1, weight=1)
+        lab = dict(bg=BG, fg=FG, font=("Segoe UI", 9))
+        tk.Label(win, text="Tell us what happened. Your report opens on GitHub for you to check and submit;\n"
+                           "nothing is sent from this app.", bg=BG, fg=DIM, font=("Segoe UI", 8),
+                 justify="left").grid(row=0, column=0, columnspan=2, sticky="w", padx=10, pady=(10, 4))
+        kinds = {label: key for key, label in FEEDBACK_KINDS}
+        kind = ttk.Combobox(win, state="readonly", width=20, values=list(kinds))
+        kind.set(FEEDBACK_KINDS[0][1])
+        tk.Label(win, text="Type", **lab).grid(row=1, column=0, sticky="w", padx=10, pady=4)
+        kind.grid(row=1, column=1, sticky="w", padx=10, pady=4)
+        title = tk.Entry(win, bg=PANEL, fg=FG, insertbackground=FG, relief="flat")
+        tk.Label(win, text="Short title", **lab).grid(row=2, column=0, sticky="w", padx=10, pady=4)
+        title.grid(row=2, column=1, sticky="we", padx=10, pady=4, ipady=3)
+        tk.Label(win, text="What happened?\nWhat did you expect?", justify="left", **lab).grid(
+            row=3, column=0, sticky="nw", padx=10, pady=4)
+        desc = tk.Text(win, bg=PANEL, fg=FG, insertbackground=FG, relief="flat", height=7, width=60,
+                       wrap="word", font=("Segoe UI", 9))
+        desc.grid(row=3, column=1, sticky="nsew", padx=10, pady=4)
+        with_log = tk.BooleanVar(value=False)
+        tk.Checkbutton(win, text="Include the last 40 lines of the error log (names, IDs, places and links "
+                                 "are removed first)", variable=with_log, bg=BG, fg=FG, selectcolor=PANEL,
+                       activebackground=BG, activeforeground=FG, font=("Segoe UI", 8),
+                       wraplength=420, justify="left").grid(row=4, column=1, sticky="w", padx=6, pady=2)
+        tk.Label(win, text="Report preview", **lab).grid(row=5, column=0, sticky="nw", padx=10, pady=4)
+        preview = tk.Text(win, bg=BG, fg=DIM, relief="flat", height=10, width=60, wrap="word",
+                          font=("Consolas", 8), state="disabled")
+        preview.grid(row=5, column=1, sticky="nsew", padx=10, pady=4)
+        win.rowconfigure(5, weight=1)
+        status = tk.Label(win, text="", bg=BG, fg=DIM, font=("Segoe UI", 8))
+
+        def build():
+            body = desc.get("1.0", "end").strip() or "(no description)"
+            lines = [body, "", "---", "**Details** (added automatically)", ""]
+            lines += [f"- {k}: {v}" for k, v in self.diagnostics()]
+            if with_log.get():
+                names = [h.get("name", "") for h in self.history.values()] + list(self.dest_names.values())
+                log_lines = scrub_log(tail_lines(DEBUG_LOG, 40), names)
+                lines += ["", "<details><summary>Recent log (cleaned)</summary>", "", "```"] + log_lines + ["```",
+                                                                                                         "</details>"]
+            key = kinds.get(kind.get(), "Bug")
+            t = title.get().strip() or {"Bug": "Bug report", "Idea": "Idea", "Works": "It worked"}[key]
+            return f"[{key}] {t}", "\n".join(lines)
+
+        def refresh(*_):
+            t, body = build()
+            preview.config(state="normal")
+            preview.delete("1.0", "end")
+            preview.insert("end", f"{t}\n\n{body}")
+            preview.config(state="disabled")
+            preview_job[0] = None
+
+        preview_job = [None]
+
+        def later(*_):  # refresh the preview shortly after typing stops, not on every key
+            if preview_job[0]:
+                win.after_cancel(preview_job[0])
+            preview_job[0] = win.after(400, refresh)
+
+        def open_github():
+            t, body = build()
+            url, cut = feedback_link(t, body)
+            webbrowser.open(url)
+            status.config(text="Opened in your browser. Check it over, then click Submit on GitHub."
+                               + (" (It was long, so it was shortened; Copy report has it all.)" if cut else ""),
+                          fg=GOOD)
+            log.info("Feedback report opened on GitHub (%d characters)", len(body))
+
+        def copy():
+            t, body = build()
+            win.clipboard_clear()
+            win.clipboard_append(f"{t}\n\n{body}")
+            status.config(text="Copied. Paste it into an email or message.", fg=GOOD)
+
+        for w in (title, desc):
+            w.bind("<KeyRelease>", later)
+        kind.bind("<<ComboboxSelected>>", refresh)
+        with_log.trace_add("write", refresh)
+        bar = tk.Frame(win, bg=BG)
+        bar.grid(row=6, column=0, columnspan=2, sticky="we", padx=10, pady=(4, 10))
+        tk.Button(bar, text="Open on GitHub", command=open_github, bg=ACCENT, fg="#000", relief="flat").pack(side="left")
+        tk.Button(bar, text="Copy report", command=copy, bg=PANEL, fg=FG, relief="flat").pack(side="left", padx=6)
+        tk.Button(bar, text="Close", command=win.destroy, bg=PANEL, fg=FG, relief="flat").pack(side="right")
+        status.grid(row=7, column=0, columnspan=2, sticky="w", padx=10, pady=(0, 8))
+        win.bind("<Escape>", lambda e: win.destroy())
+        refresh()
+        title.focus_set()
+
     def archive_days(self):
         try:
             return max(0, int(self.cfg.get("archive_days", ARCHIVE_DAYS)))
@@ -2142,6 +2335,8 @@ class App:
                     self.show()
                 elif kind == "tray":
                     self.on_tray(data)
+                elif kind == "ui":  # a background thread's small UI update, run here on the UI thread
+                    data()
                 elif kind == "online":
                     self.online_busy = False
                     if data is not None:
@@ -2196,8 +2391,12 @@ class App:
             self.add_drone_point(dec["text"], m["t"])  # plots it on the Drone track tab if it's an alert
             if self.msg_kind(m) == "drone" and dec["text"].lstrip().startswith("Drone:"):
                 self.show_banner(dec["text"])
-            if self.push and self.channel_name(packet.get("channel", 0)) == self.cfg.get("push_channel", "DroneAlert"):
-                self.push.add(m["from"], m["text"])
+            if self.push:
+                drone = self.channel_name(packet.get("channel", 0)) == self.cfg.get("push_channel", "DroneAlert") \
+                    or self.msg_kind(m) == "drone"
+                mode = self.cfg.get("push_mode", "drone")
+                if drone or mode == "all" or (mode == "dm" and m["to"] != "Everyone"):
+                    self.push.add(m["from"], m["text"], drone=drone)
         # rebuilding the lists and map per packet costs ~10% CPU on a busy mesh: batch into one refresh a second
         if not self.refresh_job:
             # big meshes make each refresh slower, so space them out: never more than ~10% of the time
@@ -3433,8 +3632,59 @@ class App:
         row(11, "Keep chat archive", ttk.Combobox(win, textvariable=keep, state="readonly", width=22,
                                                   values=list(keep_map)))
 
+        # Phone alerts (ntfy): topic, what to send, and a test button
+        tk.Label(win, text="PHONE ALERTS (ntfy)", bg=BG, fg=DIM, font=("Segoe UI", 8, "bold")).grid(
+            row=12, column=0, sticky="w", padx=10, pady=(12, 0))
+        push_topic = tk.StringVar(value=self.cfg.get("push_url", ""))
+        prow = tk.Frame(win, bg=BG)
+        tk.Entry(prow, textvariable=push_topic, bg=PANEL, fg=FG, insertbackground=FG, width=34).pack(
+            side="left", fill="x", expand=True)
+
+        def new_topic():
+            push_topic.set("https://ntfy.sh/cfc-" + "".join(random.choice("abcdefghjkmnpqrstuvwxyz23456789")
+                                                          for _ in range(16)))
+        tk.Button(prow, text="New private topic", command=new_topic, bg=PANEL, fg=FG, relief="flat",
+                  font=("Segoe UI", 8)).pack(side="left", padx=(6, 0))
+        row(13, "Topic or ntfy link\n(blank = off)", prow)
+        push_modes = dict((label, key) for key, label in PUSH_MODES)
+        push_mode = tk.StringVar(value=next((l for k, l in PUSH_MODES if k == self.cfg.get("push_mode", "drone")),
+                                            PUSH_MODES[0][1]))
+        row(14, "Send to phone", ttk.Combobox(win, textvariable=push_mode, state="readonly", width=30,
+                                              values=list(push_modes)))
+        trow = tk.Frame(win, bg=BG)
+        push_result = tk.Label(trow, text="Subscribe to the same topic in the ntfy app, then test.",
+                               bg=BG, fg=DIM, font=("Segoe UI", 8), wraplength=300, justify="left")
+
+        def push_test():
+            url = ntfy_url(push_topic.get())
+            if not url:
+                push_result.config(text="Enter a topic name (letters, numbers, - or _) or an ntfy link first.",
+                                   fg=BAD)
+                return
+            push_result.config(text="Sending…", fg=DIM)
+
+            def work():
+                ok, msg = PhonePush(url).post("Central Finite Curve test",
+                                              "If you can read this, phone alerts are working.", urgent=False)
+                self.q.put(("ui", lambda: push_result.winfo_exists() and push_result.config(
+                    text="Sent! Check your phone." if ok else f"Didn't send: {msg}"[:120], fg=GOOD if ok else BAD)))
+            threading.Thread(target=work, daemon=True, name="push-test").start()
+        tk.Button(trow, text="Send test", command=push_test, bg=PANEL, fg=FG, relief="flat",
+                  font=("Segoe UI", 9)).pack(side="left")
+        push_result.pack(side="left", padx=(8, 0))
+        trow.grid(row=15, column=1, sticky="we", padx=10, pady=(0, 6))
+
         def apply():
             before = (self.cfg["mode"], self.cfg["port"], self.cfg["host"])
+            url = ntfy_url(push_topic.get())
+            if url is not None and url != self.cfg.get("push_url", ""):
+                if url:
+                    self.cfg["push_url"] = url
+                else:
+                    self.cfg.pop("push_url", None)
+                self.push = PhonePush(url) if url and not DEMO else None
+                log.info("Phone alerts %s", "turned on" if url else "turned off")
+            self.cfg["push_mode"] = push_modes.get(push_mode.get(), "drone")
             new_keep = keep_map.get(keep.get(), keep_now)
             if new_keep != keep_now:
                 self.cfg["archive_days"] = new_keep
@@ -3491,7 +3741,9 @@ class App:
                 self.set_status("Settings saved — reconnecting…", WARN)
 
         tk.Button(win, text="Save", command=apply, bg=ACCENT, fg="#000", relief="flat",
-                  width=10).grid(row=12, column=1, sticky="e", padx=10, pady=10)
+                  width=10).grid(row=16, column=1, sticky="e", padx=10, pady=10)
+        tk.Button(win, text="Send feedback…", command=self.open_feedback, bg=PANEL, fg=FG, relief="flat",
+                  font=("Segoe UI", 9)).grid(row=16, column=0, sticky="w", padx=10, pady=10)
         snd_box.bind("<<ComboboxSelected>>", lambda e: test())  # preview on pick
         win.protocol("WM_DELETE_WINDOW", apply)  # closing with X keeps changes too
 
