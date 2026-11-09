@@ -69,6 +69,11 @@ The short version is below. For every button, setting and how-to, see the
   One click takes you to it on the map.
 - **Chat archive** — every message is kept for as long as you choose (a week up to forever), and
   you can search and scroll back through all of it whenever you like.
+- **Aircraft on the map** — planes and helicopters near you, live from adsb.fi.
+- **Drone / aircraft conflict alerts** — a warning when a drone is close to a low-flying aircraft.
+- **Airspace and no-fly zones (US)** — airport airspace and temporary flight restrictions from the
+  FAA, with a warning when a drone flies into one.
+- **Incident report** — a printable report of a drone flight, ready for the police or the FAA.
 - **Drone tab** — live flight-path tracking from Remote ID alerts: the drone's path, a pilot
   marker, the manufacturer resolved from the MAC, and a running "pings · manufacturer · RSSI"
   readout.
@@ -165,6 +170,9 @@ how many other nodes it knows.
 | Click a pin | Opens the node's **info card**: identity, hardware, location, signal and more, with **Copy location**, **Google Maps** and **Message** buttons. | ✅ |
 | **Node dropdown** (top right) | Choose what's on the map: *Nodes currently active* (no grey pins), *Nodes active in the last hour*, *…last day*, *…last month*, or *All recorded nodes*. Your choice is remembered. | 🧪 |
 | **Show internet-map nodes (purple)** | Tick or untick to show or hide nodes from meshmap.net. They're fetched every 10 minutes within the radius you set in Settings. | ✅ |
+| **Show aircraft (adsb.fi)** | Planes and helicopters near you, as cyan arrows pointing the way they're flying, labelled with callsign and altitude when you're zoomed in. Emergencies are red. Click one for its type, registration, speed, distance and, for airline flights, where it's flying from and to; or follow it on adsb.fi. Updates every 15 seconds while the map is on screen. | 🧪 |
+| **Show airspace & no-fly zones (FAA, US)** | Outlines airport airspace (Class B, C, D and E surface areas, in blues and purple) and active temporary flight restrictions (red). Click an outline for its name, altitudes and times. | 🧪 |
+| Red drone pins | Drones flying right now (heard in the last 3 minutes), so you can see them beside aircraft and nodes. Click one to jump to the Drone tab. | 🧪 |
 | **Clear map history** | Removes every recorded node from the map and the History tab, after asking first. A backup is saved as `nodes-history-backup.json`. Nodes still in your radio's own list come straight back. | 🧪 |
 | **Fit all** | Zooms to fit every pin. | ✅ |
 | **+ / − and the slider** | Zoom in and out. The scroll wheel works too. | ✅ |
@@ -184,6 +192,28 @@ the **home location** from Settings if it has no GPS.
 | **Fit path** | Frames the whole flight. | ✅ |
 | **Save flight** | Saves `flights/flight-<time>.csv` (time, drone position, RSSI, MAC, manufacturer, pilot position) plus a PNG picture of the map. | ✅ |
 | **Clear** | Starts a fresh track. | ✅ |
+| **Incident report** | Writes a report of the latest flight and opens it in your browser: start and end, drone ID and maker, every position, the pilot's reported position, closest distance to your home, the detectors that heard it, aircraft conflicts, airspace it entered, and a map picture. Print it or save it as PDF. Saved in the `flights` folder. | 🧪 |
+
+### Airspace awareness
+
+| What | How it works | Status |
+|---|---|---|
+| **Conflict alerts** | Needs *Show aircraft* switched on. When a drone that's flying now is within 3 km (about 2 miles) of an aircraft at or below 3,500 ft, you get a red CONFLICT banner, a line in the Drone panel, a sound and a phone alert (if those are on). Each drone and aircraft pair warns at most once every 5 minutes. | 🧪 |
+| **No-fly zone alerts** | When a drone flies inside an active temporary flight restriction that reaches down to drone heights, you get the banner, a sound and a phone alert. Restrictions that start high up (say, 9,000 ft) are ignored. | 🧪 |
+| **Controlled airspace notes** | When a drone flies in airspace near an airport where drones need FAA authorization, the Drone panel says so, along with the FAA's maximum altitude for that exact spot (from the UAS Facility Map). | 🧪 |
+| **Several detectors** | If two or more detectors hear the same drone, their pings are merged into one track, and the banner and Drone tab show how many heard it. | 🧪 |
+
+⚠️ **Drone altitude:** Mesh-Detect's stock alerts don't include the drone's altitude, so conflicts
+are judged by distance and the aircraft's altitude, and "above 400 ft" can't be checked. The
+detector does decode altitude, though, so a small firmware change fixes this: add
+` ALT:<metres>m AGL:<metres>m SPD:<m/s>m/s ID:<serial>` to the end of its `Drone:` line, and
+Central Finite Curve picks the extras up automatically. Older detectors keep working as before.
+
+⚠️ **Other limits:**
+Airspace data is for the **United States only**. Aircraft only show where adsb.fi's volunteer
+receivers have coverage, and not every aircraft broadcasts its position. Routes are a callsign's
+usual route, not a filed flight plan, and only exist for airline flights. Treat all of this as
+awareness, never as an official airspace or safety tool.
 
 To get alerts at all, your Remote ID detector needs to be powered on and on the same region,
 preset and channel as your radio (by default a channel called **DroneAlert**).
@@ -245,6 +275,7 @@ message to Everyone.
 | **Active = heard in last (min)** | How recent a node must be to count as active (default 180). | ✅ |
 | **Map style** | Dark, Street or Satellite. | ✅ |
 | **Online nodes within (km)** | Radius for internet-map nodes around you. | ✅ |
+| **Aircraft within (nautical mi)** | How far out to show aircraft (default 25, up to 250). | 🧪 |
 | **Home location** | Where your node sits on the map if it has no GPS. Paste "lat, lon" straight from Google Maps. It stays on your PC and is never sent over the mesh. | ✅ |
 | **Transient tracking** | How often it checks for nodes passing through: Off, Light (3 min, default), Active (1 min) or Real-time (20 s). These checks only reach radios right next to you and are never relayed, so they don't add traffic to the wider mesh. | ✅ |
 | **Keep chat archive** | How long messages are kept (see Chat archive). | 🧪 |

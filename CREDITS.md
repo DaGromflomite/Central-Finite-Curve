@@ -33,6 +33,15 @@ It stands on a lot of other people's good work. Thank you to all of the below.
 - **Internet mesh nodes:** [meshmap.net](https://meshmap.net/) (community MQTT map), shown when
   enabled.
 - **Phone push:** [ntfy](https://ntfy.sh/) (optional, user-configured).
+- **Aircraft:** [adsb.fi](https://adsb.fi) open data (free for personal, non-commercial use;
+  credited on the map whenever aircraft are shown). Shown only when switched on.
+- **Airspace and no-fly zones:** the US Federal Aviation Administration's open data: the
+  [Aeronautical Data Delivery Service](https://adds-faa.opendata.arcgis.com/) (Class airspace and
+  the UAS Facility Map) and [tfr.faa.gov](https://tfr.faa.gov/) (temporary flight restrictions).
+  Public US government data. Shown or checked only when switched on, or while a drone is flying.
+- **Airline routes:** [Virtual Radar Server standing data](https://github.com/vradarserver/standing-data)
+  (CC0), served by [adsb.lol](https://github.com/adsblol/vrs-standing-data). Looked up only when you
+  open an aircraft's card.
 
 ## Hardware this is designed to work with
 

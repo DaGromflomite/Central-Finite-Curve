@@ -16,6 +16,7 @@ import platform
 import random
 import re
 import sys
+import urllib.error
 import urllib.request
 import webbrowser
 import os
@@ -60,6 +61,7 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 CFG_PATH = os.path.join(HERE, "config.json")
 LOG_PATH = os.path.join(HERE, "messages.jsonl")
 HIST_PATH = os.path.join(HERE, "nodes-history.json")
+AIRSPACE_PATH = os.path.join(HERE, "airspace-cache.json")  # FAA zones near you, refreshed daily
 DEBUG_LOG = os.path.join(HERE, "mesh_widget.log")  # errors and health, for debugging during testing
 OUI_PATH = os.path.join(HERE, "oui.txt")           # IEEE OUI table: first 3 MAC octets -> manufacturer
 FLIGHTS_DIR = os.path.join(HERE, "flights")        # saved drone flight logs + map snapshots
@@ -69,7 +71,7 @@ def asset_path(name):
     """Path to a bundled asset (icons), working from source and from a PyInstaller build."""
     base = getattr(sys, "_MEIPASS", HERE)
     return os.path.join(base, "assets", name)
-VERSION = "0.4.0-alpha"
+VERSION = "0.5.0-alpha"
 HEALTH_SECS = 600   # how often a health line (memory, CPU, nodes) goes into the log
 DEMO = False        # --demo: made-up nodes instead of a radio, with its own files (see enable_demo)
 log = logging.getLogger("centralfinitecurve")
@@ -127,6 +129,32 @@ def oui_vendor(mac):
         except OSError:
             _OUI = {}
     return _OUI.get(key)
+AIRCRAFT = "#6ad7e5"  # aircraft from adsb.fi (cyan), so they never look like mesh nodes
+AIRCRAFT_URL = "https://opendata.adsb.fi/api/v3/lat/{lat:.4f}/lon/{lon:.4f}/dist/{nm}"
+AIRCRAFT_SECS = 15       # between fetches while a map is on screen (adsb.fi allows 1/s; we stay far below)
+AIRCRAFT_BACKOFF = 120   # after a refusal or error, wait this long before asking again
+AIRCRAFT_NM = 50         # default radius, nautical miles (adsb.fi allows up to 250); rural skies are sparse
+FAA_ARCGIS = "https://services6.arcgis.com/ssFJjBXIUyZDrSYZ/arcgis/rest/services/{svc}/FeatureServer/0/query"
+TFR_LIST_URL = "https://tfr.faa.gov/tfrapi/exportTfrList"
+TFR_XML_URL = "https://tfr.faa.gov/download/detail_{id}.xml"
+AIRSPACE_REFRESH = 86400     # airport airspace hardly changes: download it once a day
+TFR_REFRESH = 1800           # temporary flight restrictions come and go: check the list every 30 min
+AIRSPACE_SPAN = (0.6, 0.8)   # degrees of latitude / longitude around you (about 65 km)
+AIRSPACE_CLASSES = {"CLASS_B": ("Class B", "#4f8cff"), "CLASS_C": ("Class C", "#d04fd0"),
+                    "CLASS_D": ("Class D", "#4fb3ff"), "CLASS_E2": ("Class E surface", "#7aa0c8")}
+TFR_COLOUR = "#ff4d4d"
+AIRSPACE_REPEAT = 600        # seconds before the same drone/zone pair can warn again
+DRONE_FRESH_SECS = 180   # a drone counts as "in the air now" this long after its last ping
+CONFLICT_KM = 3.0        # warn when a fresh drone and a low aircraft are this close (about 1.9 mi)
+CONFLICT_ALT_FT = 3500   # "low" aircraft: at or below this altitude (feet, as the aircraft reports it)
+CONFLICT_REPEAT = 300    # seconds before the same drone/aircraft pair can warn again
+PING_DUP_SECS = 5        # the same ping heard by two detectors within this time counts once on the track
+ROUTE_URL = "https://vrs-standing-data.adsb.lol/routes/{prefix}/{callsign}.json"  # VRS standing data, CC0
+ROUTE_RE = re.compile(r"^[A-Z]{3}[0-9]{1,4}[A-Z]{0,2}$")  # airline-style callsigns only (AAL100, not N682D)
+# optional extras a detector may add to its alert: "ALT:123m AGL:45m SPD:8m/s ID:1581F..."
+DRONE_EXTRA_RE = re.compile(r"\b(ALT|AGL|SPD|ID):\s*(-?[0-9A-Za-z.]+)")
+LIMIT_AGL_M = 122        # 400 ft: the usual ceiling for hobby drones in the US
+EMERGENCY_SQUAWKS = {"7500": "hijack", "7600": "radio failure", "7700": "emergency"}
 ONLINE = "#b07cff"  # marker colour for internet-reported nodes, so they never look like radio-heard ones
 
 
@@ -369,6 +397,189 @@ def tail_lines(path, count, chunk=262144):
     if size > chunk:
         lines = lines[1:]  # the first one is probably cut in half
     return lines[-count:]
+
+
+def route_plausible(route, lat, lon):
+    """A callsign's usual route can be stale or reused: only trust it if the aircraft is roughly
+    on the way between the two airports."""
+    try:
+        a, b = route["_airports"][0], route["_airports"][-1]
+        o, d = (a["lat"], a["lon"]), (b["lat"], b["lon"])
+    except (KeyError, IndexError, TypeError):
+        return False
+    direct = km_between(o, d)
+    return km_between(o, (lat, lon)) + km_between((lat, lon), d) <= direct * 1.3 + 80
+
+
+def drone_extras(text):
+    """Optional altitude/speed/ID fields a detector can append to its alert. Missing = None."""
+    out = {}
+    for key, val in DRONE_EXTRA_RE.findall(text or ""):
+        if key == "ID":
+            out["serial"] = val[:24]
+            continue
+        try:
+            num = float(re.sub(r"[^0-9.-]", "", val))
+        except ValueError:
+            continue
+        out[{"ALT": "alt_m", "AGL": "agl_m", "SPD": "speed_ms"}[key]] = num
+    return out
+
+
+def parse_aircraft(data, now=None):
+    """adsb.fi (ADSBexchange v2 format) -> [{hex, call, reg, type, desc, heli, alt, ground, gs, track,
+    lat, lon, squawk, emergency, seen}]. Skips aircraft without a recent position."""
+    out = []
+    for a in (data or {}).get("ac") or []:
+        try:
+            lat, lon = float(a["lat"]), float(a["lon"])
+        except (KeyError, TypeError, ValueError):
+            continue
+        if not (-90 <= lat <= 90 and -180 <= lon <= 180) or float(a.get("seen_pos") or 0) > 60:
+            continue
+        alt = a.get("alt_baro")
+        ground = alt == "ground"
+        try:
+            alt = 0 if ground else int(alt if alt is not None else a.get("alt_geom"))
+        except (TypeError, ValueError):
+            alt = None
+        hexid = str(a.get("hex", "")).strip().lower()
+        if not re.fullmatch(r"~?[0-9a-f]{6}", hexid):
+            continue
+        squawk = str(a.get("squawk") or "")
+        emerg = a.get("emergency")
+        emerg = EMERGENCY_SQUAWKS.get(squawk) or (emerg if emerg and emerg != "none" else None)
+        track = a.get("track", a.get("true_heading"))
+        out.append({
+            "hex": hexid, "call": (a.get("flight") or "").strip() or a.get("r") or hexid.upper(),
+            "reg": a.get("r") or "", "type": a.get("t") or "", "desc": a.get("desc") or "",
+            "heli": a.get("category") == "A7" or str(a.get("t", "")).startswith(("H", "EC", "AS3", "R44", "R22")),
+            "alt": alt, "ground": ground, "gs": a.get("gs"),
+            "track": float(track) if isinstance(track, (int, float)) else None,
+            "lat": lat, "lon": lon, "squawk": squawk, "emergency": emerg,
+            "seen": float(a.get("seen") or 0)})
+    return out
+
+
+def point_in_rings(lat, lon, rings):
+    """Ray-casting point-in-polygon. rings = [outer, hole, ...], each [(lat, lon), ...]."""
+    inside = False
+    for ring in rings:
+        n = len(ring)
+        j = n - 1
+        for i in range(n):
+            yi, xi = ring[i]
+            yj, xj = ring[j]
+            if (yi > lat) != (yj > lat) and lon < (xj - xi) * (lat - yi) / ((yj - yi) or 1e-12) + xi:
+                inside = not inside
+            j = i
+    return inside
+
+
+def geojson_rings(geom):
+    """GeoJSON Polygon/MultiPolygon -> list of polygons, each a list of rings of (lat, lon)."""
+    if not geom:
+        return []
+    polys = [geom["coordinates"]] if geom.get("type") == "Polygon" else geom.get("coordinates", []) \
+        if geom.get("type") == "MultiPolygon" else []
+    return [[[(c[1], c[0]) for c in ring] for ring in poly] for poly in polys]
+
+
+def parse_tfr_xml(text):
+    """One FAA TFR (XNOTAM XML) -> {name, type, lower, upper, start, end, polys} or None.
+    Outline points come as e.g. 31.568N / 110.193W."""
+    def coord(v):
+        v = v.strip()
+        num = float(v[:-1])
+        return -num if v[-1] in "SW" else num
+    def tags(t, src):
+        return re.findall(rf"<{t}>([^<]*)</{t}>", src)
+    merged = re.findall(r"<abdMergedArea>(.*?)</abdMergedArea>", text, re.S)
+    polys = []
+    for area in (merged or [text]):
+        lats, lons = tags("geoLat", area), tags("geoLong", area)
+        try:
+            pts = [(coord(a), coord(b)) for a, b in zip(lats, lons)]
+        except (ValueError, IndexError):
+            continue
+        if len(pts) >= 3:
+            polys.append([pts])
+    if not polys:
+        return None
+    first = lambda t: (tags(t, text) or [""])[0]
+    def when(v):
+        try:
+            return datetime.datetime.strptime(v[:19], "%Y-%m-%dT%H:%M:%S").replace(
+                tzinfo=datetime.timezone.utc).timestamp()
+        except ValueError:
+            return None
+    return {"name": first("txtLocalName") or first("txtName"), "lower": first("valDistVerLower"),
+            "upper": first("valDistVerUpper"), "start": when(first("dateEffective")),
+            "end": when(first("dateExpire")), "polys": polys}
+
+
+def fetch_airspace(center, old=None, zones=True, tfr=True):
+    """Download FAA zones around `center`: airport airspace (Class B/C/D/E2), the drone facility-map grid
+    (max authorized altitudes near airports) and active temporary flight restrictions. Keeps what's still
+    valid from `old`, so a refresh downloads as little as possible."""
+    import urllib.parse
+    out = dict(old or {})
+    out["center"] = list(center)
+    lat, lon = center
+    dl, dn = AIRSPACE_SPAN
+    box = f"{lon - dn},{lat - dl},{lon + dn},{lat + dl}"
+
+    def get(url, params=None, timeout=30):
+        if params:
+            url += "?" + urllib.parse.urlencode(params)
+        req = urllib.request.Request(url, headers={"User-Agent": USER_AGENT})
+        with urllib.request.urlopen(req, timeout=timeout) as r:
+            return r.read()
+
+    def query(svc, where, fields):
+        data = json.loads(get(FAA_ARCGIS.format(svc=svc), {
+            "where": where, "geometry": box, "geometryType": "esriGeometryEnvelope", "inSR": 4326,
+            "spatialRel": "esriSpatialRelIntersects", "outSR": 4326, "outFields": fields,
+            "returnGeometry": "true", "geometryPrecision": 5, "maxAllowableOffset": 0.0003, "f": "geojson"}))
+        if "error" in data:
+            raise IOError(f"FAA {svc}: {data['error'].get('message', 'error')}")
+        return data.get("features") or []
+
+    if zones:
+        types = ",".join(f"'{t}'" for t in AIRSPACE_CLASSES)
+        out["zones"] = [{"name": f["properties"].get("NAME") or "", "type": f["properties"].get("LOCAL_TYPE"),
+                         "lower": f["properties"].get("LOWER_VAL"), "upper": f["properties"].get("UPPER_VAL"),
+                         "state": f["properties"].get("STATE") or "", "polys": geojson_rings(f.get("geometry"))}
+                        for f in query("Class_Airspace", f"LOCAL_TYPE IN ({types})", "NAME,LOCAL_TYPE,LOWER_VAL,UPPER_VAL,STATE")]
+        out["grid"] = [{"ceil": f["properties"].get("CEILING"), "apt": f["properties"].get("APT1_NAME") or "",
+                        "polys": geojson_rings(f.get("geometry"))}
+                       for f in query("FAA_UAS_FacilityMap_Data", "1=1", "CEILING,APT1_NAME")]
+        out["zones_at"] = time.time()
+    if tfr:
+        listing = json.loads(get(TFR_LIST_URL))
+        states = {z.get("state") for z in out.get("zones") or [] if z.get("state")}
+        cache = dict(out.get("tfr") or {})
+        keep = {}
+        for item in listing:
+            nid = str(item.get("notam_id") or "")
+            if not re.fullmatch(r"\d/\d{1,5}", nid):
+                continue
+            if states and item.get("state") and item["state"] not in states:
+                continue  # another state: skip without downloading its outline
+            if nid in cache:
+                keep[nid] = cache[nid]
+                continue
+            try:
+                t = parse_tfr_xml(get(TFR_XML_URL.format(id=nid.replace("/", "_"))).decode("utf-8-sig", "replace"))
+            except Exception:
+                t = None
+            if t and not any(km_between(center, pt) < 150 for poly in t["polys"] for pt in poly[0][::max(1, len(poly[0]) // 20)]):
+                t = None  # nowhere near you
+            keep[nid] = t
+            time.sleep(0.5)  # be gentle with the FAA site
+        out["tfr"] = keep
+        out["tfr_at"] = time.time()
+    return out
 
 
 def scrub_log(lines, names=()):
@@ -950,7 +1161,7 @@ DEMO_EXTRA = 0  # --demo-nodes=N: this many extra plain nodes, to see how it cop
 
 def enable_demo(folder=None, extra_nodes=0):
     """Switch to made-up nodes with separate files, so a demo never touches real history, messages or settings."""
-    global DEMO, CFG_PATH, LOG_PATH, HIST_PATH, DEBUG_LOG, HEALTH_SECS, DEMO_EXTRA
+    global DEMO, CFG_PATH, LOG_PATH, HIST_PATH, AIRSPACE_PATH, FLIGHTS_DIR, DEBUG_LOG, HEALTH_SECS, DEMO_EXTRA
     DEMO, DEMO_EXTRA = True, extra_nodes
     folder = folder or os.path.join(HERE, "demo")
     os.makedirs(folder, exist_ok=True)
@@ -962,6 +1173,8 @@ def enable_demo(folder=None, extra_nodes=0):
                              if k in real})
     LOG_PATH = os.path.join(folder, "demo-messages.jsonl")
     HIST_PATH = os.path.join(folder, "demo-history.json")
+    AIRSPACE_PATH = os.path.join(folder, "demo-airspace.json")
+    FLIGHTS_DIR = os.path.join(folder, "flights")  # demo flights and reports never mix with real ones
     DEBUG_LOG = os.path.join(folder, "demo.log")
     for path in (LOG_PATH, HIST_PATH):  # every demo starts with an empty mesh
         try:
@@ -1167,6 +1380,22 @@ class App:
         self.heard = {}       # node id -> (time, snr) of the last packet we got from it
         self.pending = {}     # packet id -> (recipient name, time sent), waiting for an ACK
         self.pending_nid = {} # packet id -> recipient node id, for follow-ups such as fetching a missing key
+        self.drone_seen = {}  # drone MAC -> latest ping, pilot, detectors that heard it (see note_drone_ping)
+        self.ping_log = []    # every drone ping with the detector that heard it, for reports (bounded)
+        self.conflicts = []   # drone/aircraft near-misses we warned about, for reports (bounded)
+        self.conflict_seen = {}  # (mac, hex) -> last warning time
+        self.dm_markers = {}  # drone MAC -> marker on the main map
+        self.airspace = load_json(AIRSPACE_PATH) or {}  # cached FAA zones near you (see fetch_airspace)
+        self.as_shapes = []   # polygons drawn on the main map
+        self.as_busy = False
+        self.as_next = 0
+        self.as_seen = {}     # (mac, zone) -> last warning time
+        self.airspace_hits = []  # drones found inside a zone, for reports (bounded)
+        self.aircraft = {}    # hex -> aircraft dict from adsb.fi (see parse_aircraft)
+        self.ac_markers = {}  # (map id, hex) -> marker
+        self.ac_icons = {}    # (heading bucket, colour) -> PhotoImage
+        self.ac_next = 0      # earliest time for the next aircraft fetch
+        self.ac_busy = False
         self.line_seq = 0     # message panels: each shown message gets a tag "m<seq>"...
         self.line_msgs = {}   # ...that maps back to its record, for the right-click menu
         self.key_asked = {}   # node id -> when we last asked it for its node info (public key)
@@ -1213,6 +1442,7 @@ class App:
         self.geo_job = None
         self.build_ui()
         self.load_history()
+        self.replay_pings()
 
         pub.subscribe(self.on_receive, "meshtastic.receive")
         pub.subscribe(self.on_established, "meshtastic.connection.established")
@@ -1320,6 +1550,7 @@ class App:
                                   font=("Segoe UI", 9))
         self.track_lbl.pack(side="left", padx=4)
         tk.Button(dbar, text="Save flight", command=self.save_flight, **dbtn).pack(side="left", padx=(6, 0))
+        tk.Button(dbar, text="Incident report", command=self.make_report, **dbtn).pack(side="left", padx=(6, 0))
         tk.Button(dbar, text="Clear", command=self.clear_track, **dbtn).pack(side="left", padx=(6, 0))
         self.apply_map_style()          # same tiles as the main map
         self.load_track_file()          # replay today's alerts from the message log
@@ -1460,8 +1691,25 @@ class App:
                                              activebackground=PANEL, activeforeground=ONLINE,
                                              font=("Segoe UI", 8), relief="flat", bd=0, padx=4)
             self.online_btn.place(relx=1.0, x=-6, y=62, anchor="ne")
+            self.ac_var = tk.BooleanVar(value=bool(self.cfg.get("aircraft_on", False)))
+            tk.Checkbutton(f3, text="Show aircraft (adsb.fi)", variable=self.ac_var, command=self.toggle_aircraft,
+                           bg=PANEL, fg=AIRCRAFT, selectcolor=BG, activebackground=PANEL, activeforeground=AIRCRAFT,
+                           font=("Segoe UI", 8), relief="flat", bd=0, padx=4).place(relx=1.0, x=-6, y=86, anchor="ne")
+            self.as_var = tk.BooleanVar(value=bool(self.cfg.get("airspace_on", False)))
+            tk.Checkbutton(f3, text="Show airspace & no-fly zones (FAA, US)", variable=self.as_var,
+                           command=self.toggle_airspace, bg=PANEL, fg="#4fb3ff", selectcolor=BG,
+                           activebackground=PANEL, activeforeground="#4fb3ff", font=("Segoe UI", 8), relief="flat",
+                           bd=0, padx=4).place(relx=1.0, x=-6, y=110, anchor="ne")
             tk.Button(f3, text="Clear map history", command=self.clear_map_history, bg=PANEL, fg=DIM,
-                      relief="flat", font=("Segoe UI", 8)).place(relx=1.0, x=-6, y=88, anchor="ne")
+                      relief="flat", font=("Segoe UI", 8)).place(relx=1.0, x=-6, y=136, anchor="ne")
+            if self.cfg.get("airspace_on"):
+                self.root.after(1500, self.draw_airspace)
+            # adsb.fi asks to be credited with a link whenever its data is shown
+            self.ac_credit = tk.Label(f3, text="Aircraft data: adsb.fi", bg=PANEL, fg=AIRCRAFT, cursor="hand2",
+                                      font=("Segoe UI", 8, "underline"))
+            self.ac_credit.bind("<Button-1>", lambda e: webbrowser.open("https://adsb.fi"))
+            if self.cfg.get("aircraft_on"):
+                self.ac_credit.place(relx=0.0, rely=1.0, x=6, y=-44, anchor="sw")
             self.tabs.add(f3, text="Map")
             self.map_tab = f3
             self.tabs.bind("<<NotebookTabChanged>>", self.sync_map_awake)
@@ -1526,8 +1774,11 @@ class App:
                   relief="flat").pack(side="right")
 
     def set_status(self, text, color):
-        self.status.config(text=text)
-        self.dot.config(fg=color)
+        try:
+            self.status.config(text=text)
+            self.dot.config(fg=color)
+        except tk.TclError:
+            return  # the window is already closing (a last radio event during Quit)
         self.tray_color = color
         self.update_tray()
 
@@ -2260,6 +2511,10 @@ class App:
         if (self.map and self.cfg.get("online_nodes", True) and not self.online_busy
                 and time.time() - self.online_last > ONLINE_REFRESH_SECS):
             self.refresh_online()
+        self.maybe_fetch_aircraft()
+        self.maybe_fetch_airspace()
+        if self.dm_markers:
+            self.draw_drones_main()  # drops drones that have gone quiet
         if self.hist_dirty:
             save_json(HIST_PATH, self.history)
             self.hist_dirty = False
@@ -2337,6 +2592,19 @@ class App:
                     self.on_tray(data)
                 elif kind == "ui":  # a background thread's small UI update, run here on the UI thread
                     data()
+                elif kind == "airspace":
+                    self.as_busy = False
+                    if data is not None:
+                        self.airspace = data
+                        save_json(AIRSPACE_PATH, data)
+                        self.draw_airspace()
+                elif kind == "aircraft":
+                    self.ac_busy = False
+                    if data is not None:
+                        self.aircraft = {a["hex"]: a for a in data}
+                        self.draw_aircraft()
+                        self.check_conflicts()
+                    self.update_ac_credit(ok=data is not None)
                 elif kind == "online":
                     self.online_busy = False
                     if data is not None:
@@ -2388,9 +2656,13 @@ class App:
                  "ch": self.channel_name(packet.get("channel", 0))}
             self.log_msg(m)
             self.add_msg(m, notify=True)
-            self.add_drone_point(dec["text"], m["t"])  # plots it on the Drone track tab if it's an alert
+            if self.note_drone_ping(dec["text"], m["t"], frm):  # False for the same ping from a 2nd detector
+                self.add_drone_point(dec["text"], m["t"])  # plots it on the Drone track tab if it's an alert
             if self.msg_kind(m) == "drone" and dec["text"].lstrip().startswith("Drone:"):
                 self.show_banner(dec["text"])
+                self.draw_drones_main()
+                self.check_conflicts()
+                self.check_airspace()
             if self.push:
                 drone = self.channel_name(packet.get("channel", 0)) == self.cfg.get("push_channel", "DroneAlert") \
                     or self.msg_kind(m) == "drone"
@@ -3145,6 +3417,371 @@ class App:
         win.lift()
         entry.focus_force()
 
+    # ---------- airspace & no-fly zones (FAA open data, US only) ----------
+    def toggle_airspace(self):
+        on = bool(self.as_var.get())
+        self.cfg["airspace_on"] = on
+        save_cfg(self.cfg)
+        if on:
+            self.as_next = 0
+            if self.map_center() is None:
+                self.set_status("Set a home location in Settings to see airspace", WARN)
+        self.draw_airspace()
+
+    def maybe_fetch_airspace(self):
+        if self.as_busy or time.time() < self.as_next:
+            return
+        if not (self.cfg.get("airspace_on") or self.fresh_drones()):
+            return  # only needed for the map layer or to check a drone that's flying now
+        center = self.map_center()
+        if center is None:
+            return
+        old = self.airspace or {}
+        moved = old.get("center") is None or km_between(tuple(old["center"]), center) > 20
+        need_zones = moved or time.time() - old.get("zones_at", 0) > AIRSPACE_REFRESH
+        need_tfr = moved or time.time() - old.get("tfr_at", 0) > TFR_REFRESH
+        if not (need_zones or need_tfr):
+            return
+        self.as_busy = True
+        self.as_next = time.time() + 300
+
+        def work():
+            try:
+                self.q.put(("airspace", fetch_airspace(center, None if moved else old, need_zones, need_tfr)))
+            except Exception as e:
+                self.as_next = time.time() + 900  # FAA busy or offline: try again later
+                warn_once("airspace", "Airspace download failed: %s", e)
+                self.q.put(("airspace", None))
+        threading.Thread(target=work, daemon=True, name="airspace").start()
+
+    def active_tfrs(self, now=None):
+        now = now or time.time()
+        return [t for t in (self.airspace.get("tfr") or {}).values()
+                if t and (t.get("end") is None or t["end"] > now) and (t.get("start") is None or t["start"] < now + 86400)]
+
+    def draw_airspace(self):
+        """Outline airport airspace (by class) and temporary flight restrictions (red) on the main map."""
+        if not self.map:
+            return
+        for shape in self.as_shapes:
+            try:
+                shape.delete()
+            except Exception:
+                pass
+        self.as_shapes = []
+        if not self.cfg.get("airspace_on"):
+            return
+        for z in self.airspace.get("zones") or []:
+            label, colour = AIRSPACE_CLASSES.get(z["type"], ("Airspace", "#4fb3ff"))
+            for poly in z["polys"]:
+                self.as_shapes.append(self.map.set_polygon(
+                    poly[0], outline_color=colour, fill_color=None, border_width=2,
+                    command=lambda _p, z=z: self.show_zone_info(z)))
+        now = time.time()
+        for t in self.active_tfrs(now):
+            for poly in t["polys"]:
+                self.as_shapes.append(self.map.set_polygon(
+                    poly[0], outline_color=TFR_COLOUR, fill_color=None, border_width=3,
+                    command=lambda _p, t=t: self.show_zone_info(t, tfr=True)))
+
+    def show_zone_info(self, z, tfr=False):
+        fmt = lambda v: datetime.datetime.fromtimestamp(v).strftime("%Y-%m-%d %H:%M") if v else "?"
+        if tfr:
+            text = (f"Temporary flight restriction\n{z['name']}\nFrom {fmt(z.get('start'))} to {fmt(z.get('end'))}\n"
+                    f"Altitudes {z.get('lower') or 'surface'} to {z.get('upper') or '?'} ft\n\n"
+                    "Drones generally may not fly here while it's active. Check the FAA TFR list for the details.")
+        else:
+            label = AIRSPACE_CLASSES.get(z["type"], ("Airspace", ""))[0]
+            text = (f"{z['name']}\n{label} airspace, {z.get('lower', 0)} to {z.get('upper', '?')} ft\n\n"
+                    "Drones need FAA authorization (usually through LAANC) to fly here.")
+        messagebox.showinfo("Airspace", text, parent=self.root)
+
+    def zones_at(self, lat, lon, now=None):
+        """FAA zones a point is inside: [(key, description)]."""
+        hits = []
+        for t in self.active_tfrs(now):
+            try:
+                if float(t.get("lower") or 0) > 1000:
+                    continue  # starts well above where drones fly
+            except ValueError:
+                pass
+            if any(point_in_rings(lat, lon, poly) for poly in t["polys"]):
+                hits.append(("tfr:" + t["name"], f"inside a temporary flight restriction ({t['name']})"))
+        for z in self.airspace.get("zones") or []:
+            if any(point_in_rings(lat, lon, poly) for poly in z["polys"]):
+                label = AIRSPACE_CLASSES.get(z["type"], ("controlled", ""))[0]
+                hits.append(("zone:" + z["name"], f"inside {label} airspace ({z['name']}): needs FAA authorization"))
+        for c in self.airspace.get("grid") or []:
+            if any(point_in_rings(lat, lon, poly) for poly in c["polys"]):
+                hits.append(("grid:" + c["apt"], f"in an airport area where drones may fly no higher than "
+                                                 f"{c['ceil']} ft with authorization ({c['apt']})"))
+                break
+        return hits
+
+    def check_airspace(self, now=None):
+        """Warn when a drone that's flying now is inside a no-fly zone or controlled airspace,
+        or (when its detector reports height) above the 400 ft limit."""
+        now = now or time.time()
+        found = []
+        for d in self.fresh_drones(now):
+            zones = self.zones_at(d["lat"], d["lon"], now)
+            if d.get("agl_m") is not None and d["agl_m"] > LIMIT_AGL_M:
+                zones.append(("high", f"flying {d['agl_m'] * 3.281:.0f} ft above the ground, over the 400 ft limit"))
+            for key, what in zones:
+                found.append((d, key, what))
+                k = (d["mac"], key)
+                if now - self.as_seen.get(k, 0) < AIRSPACE_REPEAT:
+                    continue
+                self.as_seen[k] = now
+                self.airspace_hits.append({"t": now, "mac": d["mac"], "what": what})
+                self.airspace_hits = self.airspace_hits[-500:]
+                text = f"⚠ AIRSPACE: drone {d['vendor'] or d['mac']} is {what}"
+                log.warning("Drone %s %s", d["mac"], what)
+                self.panel_write("drone", [(f"{datetime.datetime.now().strftime('%m/%d %H:%M')}  {text}" + chr(10), "bad")])
+                if key.startswith("tfr:"):  # a no-fly zone is urgent; controlled airspace is just noted
+                    if self.cfg["sound"]:
+                        alert(self.cfg)
+                    if self.push:
+                        self.push.add("Central Finite Curve", text, drone=True)
+                    self.banner_lbl.config(text=text)
+                    if not self.banner.winfo_ismapped():
+                        self.banner.pack(fill="x", padx=8, pady=(0, 6), after=self.top_bar)
+        return found
+
+    # ---------- aircraft (adsb.fi) ----------
+    def maps_awake(self):
+        return [m for m in (self.map, getattr(self, "dmap", None)) if m is not None and m.awake.is_set()]
+
+    def maybe_fetch_aircraft(self):
+        """Ask adsb.fi for nearby aircraft, but only while aircraft are switched on and a map is on screen,
+        and never more often than every AIRCRAFT_SECS. Runs on a short-lived thread."""
+        awake = self.maps_awake()
+        if not self.cfg.get("aircraft_on") or self.ac_busy or time.time() < self.ac_next or not awake:
+            return
+        center, nm = self.aircraft_area(awake[0])
+        if center is None:
+            return
+        self.ac_radius = nm
+        url = AIRCRAFT_URL.format(lat=center[0], lon=center[1], nm=nm)
+        self.ac_busy = True
+        self.ac_next = time.time() + AIRCRAFT_SECS
+
+        def work():
+            try:
+                req = urllib.request.Request(url, headers={"User-Agent": USER_AGENT})
+                with urllib.request.urlopen(req, timeout=10) as r:
+                    data = json.loads(r.read().decode("utf-8"))
+                self.q.put(("aircraft", parse_aircraft(data)))
+            except Exception as e:
+                self.ac_next = time.time() + AIRCRAFT_BACKOFF  # refused (429) or offline: back off
+                warn_once("aircraft", "Aircraft fetch failed: %s", e)
+                self.q.put(("aircraft", None))
+        threading.Thread(target=work, daemon=True, name="aircraft").start()
+
+    def aircraft_area(self, m):
+        """Where to look for aircraft: like a flight radar, the area the map is showing (up to adsb.fi's
+        250 nm), never smaller than the radius in Settings. While a drone is flying, centre on it instead,
+        so conflict checks always cover it."""
+        try:
+            floor = min(250, max(1, int(self.cfg.get("aircraft_nm", AIRCRAFT_NM))))
+        except (TypeError, ValueError):
+            floor = AIRCRAFT_NM
+        drones = self.fresh_drones()
+        if drones:
+            d = max(drones, key=lambda x: x["t"])
+            return (d["lat"], d["lon"]), floor
+        try:
+            lat, lon = m.get_position()
+            mpp = 156543.03 * math.cos(math.radians(lat)) / 2 ** m.zoom  # metres per pixel
+            view_nm = mpp * math.hypot(m.winfo_width(), m.winfo_height()) / 2 / 1852
+            return (lat, lon), int(min(250, max(floor, view_nm)))
+        except (tk.TclError, ValueError, TypeError, AttributeError):
+            return self.map_center(), floor
+
+    def update_ac_credit(self, ok=True):
+        """The adsb.fi credit doubles as a status line, so an empty sky doesn't look like a fault."""
+        if not getattr(self, "ac_credit", None):
+            return
+        nm = getattr(self, "ac_radius", AIRCRAFT_NM)
+        when = datetime.datetime.now().strftime("%H:%M")
+        n = len(self.aircraft)
+        state = (f"{n} aircraft in view ({nm} nm) · {when}" if ok
+                 else "adsb.fi didn't answer, trying again in 2 min")
+        self.ac_credit.config(text=f"Aircraft data: adsb.fi  ·  {state}")
+
+    def map_center(self):
+        my_id, my_pos = getattr(self, "last_me", (None, {}))
+        if real_pos(my_pos or {}):
+            return my_pos["latitude"], my_pos["longitude"]
+        return self.home()
+
+    def toggle_aircraft(self):
+        on = bool(self.ac_var.get())
+        self.cfg["aircraft_on"] = on
+        save_cfg(self.cfg)
+        if on:
+            self.ac_next = 0
+            self.ac_credit.place(relx=0.0, rely=1.0, x=6, y=-44, anchor="sw")
+            if self.map_center() is None:
+                self.set_status("Set a home location in Settings to see aircraft", WARN)
+        else:
+            self.ac_credit.place_forget()
+            self.aircraft = {}
+            self.draw_aircraft()
+
+    def plane_icon(self, track, colour, heli=False):
+        """A top-down plane (or helicopter) silhouette turned the way it's heading, cached per 15 degrees.
+        Drawn 4x large on a 22-unit grid, then shrunk for smooth edges."""
+        bucket = int(round((track or 0) / 15.0)) % 24
+        key = (bucket, colour, heli)
+        if key not in self.ac_icons:
+            k, size = 4, 22
+            img = Image.new("RGBA", (size * k, size * k), (0, 0, 0, 0))
+            d = ImageDraw.Draw(img)
+            sc = lambda pts: [(x * k, y * k) for x, y in pts]
+            edge = "#0b1412"
+            if heli:
+                for a, b in (((3, 4), (19, 14)), ((19, 4), (3, 14))):           # main rotor
+                    d.line(sc([a, b]), fill=edge, width=int(3.2 * k))
+                    d.line(sc([a, b]), fill=colour, width=int(1.6 * k))
+                d.rectangle(sc([(10.3, 13), (11.7, 21)]), fill=colour, outline=edge, width=k)   # tail boom
+                d.line(sc([(8.5, 20.5), (13.5, 20.5)]), fill=colour, width=int(1.4 * k))        # tail rotor
+                d.ellipse(sc([(7.5, 4.5), (14.5, 15)]), fill=colour, outline=edge, width=k)     # cabin
+            else:
+                d.polygon(sc([(11, 7.5), (21.5, 12.5), (21.5, 14), (12.3, 12.2), (9.7, 12.2),
+                              (0.5, 14), (0.5, 12.5)]), fill=colour, outline=edge)              # wings
+                d.polygon(sc([(11, 16.5), (15.5, 19.8), (15.5, 21), (11, 19.8), (6.5, 21),
+                              (6.5, 19.8)]), fill=colour, outline=edge)                         # tail
+                d.polygon(sc([(11, 0.5), (12.3, 2.5), (12.3, 19.5), (11, 21.5), (9.7, 19.5),
+                              (9.7, 2.5)]), fill=colour, outline=edge)                          # fuselage
+            if track is not None:
+                img = img.rotate(-bucket * 15, resample=Image.BICUBIC)
+            self.ac_icons[key] = ImageTk.PhotoImage(img.resize((size, size), Image.LANCZOS))
+        return self.ac_icons[key]
+
+    def ac_label(self, a):
+        alt = "ground" if a["ground"] else (f"{a['alt']:,} ft" if a["alt"] is not None else "")
+        tag = "EMERGENCY " if a["emergency"] else ("Heli " if a["heli"] else "")
+        return f"{tag}{a['call']} {alt}".strip()
+
+    def draw_aircraft(self):
+        """Put the latest aircraft on every map that exists, updating markers in place."""
+        for m in (self.map, getattr(self, "dmap", None)):
+            if m is None:
+                continue
+            mid = id(m)
+            show_labels = round(m.zoom) >= 9
+            for (k_mid, hexid) in [k for k in self.ac_markers if k[0] == mid]:
+                if hexid not in self.aircraft:
+                    self.ac_markers.pop((k_mid, hexid)).delete()
+            for hexid, a in self.aircraft.items():
+                colour = BAD if a["emergency"] else AIRCRAFT
+                icon = self.plane_icon(a["track"], colour, a["heli"])
+                label = self.ac_label(a) if show_labels or a["emergency"] else ""
+                mk = self.ac_markers.get((mid, hexid))
+                if mk is not None and getattr(mk, "ac_key", None) != (a["track"] and round(a["track"] / 15), colour):
+                    mk.delete()
+                    mk = None
+                if mk is None:
+                    mk = m.set_marker(a["lat"], a["lon"], text=label, text_color=colour, font=("Segoe UI", 8),
+                                      icon=icon, icon_anchor="center",
+                                      command=lambda mk: self.show_aircraft_info(mk.data), data=hexid)
+                    mk.ac_key = (a["track"] and round(a["track"] / 15), colour)
+                    self.ac_markers[(mid, hexid)] = mk
+                else:
+                    if mk.position != (a["lat"], a["lon"]):
+                        mk.set_position(a["lat"], a["lon"])
+                    if mk.text != label:
+                        mk.set_text(label)
+
+    def lookup_route(self, a, label):
+        """Fill in "From → To" for airline flights, looked up once per callsign (only when a card opens)."""
+        cs = a["call"].upper().replace(" ", "")
+        if not ROUTE_RE.match(cs):
+            label.config(text="Route: not an airline flight (no published route)")
+            return
+        cache = getattr(self, "route_cache", None)
+        if cache is None:
+            cache = self.route_cache = {}
+
+        def show(route):
+            if not label.winfo_exists():
+                return
+            if not route:
+                label.config(text="Route: not found for this callsign")
+            elif not route_plausible(route, a["lat"], a["lon"]):
+                label.config(text="Route: the listed route doesn't match where it is, so it's not shown")
+            else:
+                o, d = route["_airports"][0], route["_airports"][-1]
+                label.config(text=f"Route: {o.get('iata') or o.get('icao')} ({o.get('location') or o.get('name')}) → "
+                                  f"{d.get('iata') or d.get('icao')} ({d.get('location') or d.get('name')})", fg=FG)
+        if cs in cache:
+            show(cache[cs])
+            return
+        label.config(text="Route: looking up…")
+
+        def work():
+            route = None
+            try:
+                req = urllib.request.Request(ROUTE_URL.format(prefix=cs[:2], callsign=cs),
+                                             headers={"User-Agent": USER_AGENT})
+                with urllib.request.urlopen(req, timeout=10) as r:
+                    route = json.loads(r.read().decode("utf-8"))
+            except urllib.error.HTTPError as e:
+                route = None if e.code == 404 else False
+            except Exception:
+                route = False
+            if route is not False:
+                cache[cs] = route
+            self.q.put(("ui", lambda: show(route or None)))
+        threading.Thread(target=work, daemon=True, name="route").start()
+
+    def show_aircraft_info(self, hexid):
+        a = self.aircraft.get(hexid)
+        if not a:
+            return
+        if getattr(self, "ac_win", None) is not None and self.ac_win.winfo_exists():
+            self.ac_win.destroy()
+        win = self.ac_win = tk.Toplevel(self.root, bg=BG)
+        win.title(f"{a['call']} - aircraft")
+        win.transient(self.root)
+        win.attributes("-topmost", self.cfg.get("on_top", False))
+        win.geometry(f"+{self.root.winfo_pointerx() + 12}+{max(0, self.root.winfo_pointery() - 40)}")
+        home = self.map_center()
+        dist = None
+        if home:
+            d = km_between(home, (a["lat"], a["lon"]))
+            dist = f"{d:.1f} km / {d * 0.621371:.1f} mi from you"
+        rows = [("Callsign", a["call"]), ("Registration", a["reg"]), ("Type", a["desc"] or a["type"]),
+                ("Altitude", "on the ground" if a["ground"] else (f"{a['alt']:,} ft" if a["alt"] is not None else "?")),
+                ("Speed", f"{a['gs']:.0f} kt" if isinstance(a["gs"], (int, float)) else ""),
+                ("Heading", f"{a['track']:.0f}°" if a["track"] is not None else ""),
+                ("Squawk", a["squawk"]), ("Emergency", a["emergency"] or ""),
+                ("Distance", dist or ""), ("ICAO hex", a["hex"].upper())]
+        txt = tk.Text(win, bg=PANEL, fg=FG, relief="flat", font=("Segoe UI", 9), width=54, padx=10, pady=8,
+                      tabs=("100p",), height=sum(1 for _, v in rows if v) + 2)
+        txt.tag_configure("head", foreground=AIRCRAFT, font=("Segoe UI", 9, "bold"))
+        txt.tag_configure("label", foreground=DIM)
+        txt.tag_configure("bad", foreground=BAD)
+        txt.insert("end", (("EMERGENCY · " if a["emergency"] else "") + a["call"]) + "\n",
+                   "bad" if a["emergency"] else "head")
+        for k, v in rows:
+            if v:
+                txt.insert("end", f"{k}\t", "label")
+                txt.insert("end", f"{v}\n")  # plain text only
+        txt.config(state="disabled")
+        txt.pack(fill="both", expand=True, padx=8, pady=(8, 0))
+        route_lbl = tk.Label(win, text="", bg=BG, fg=DIM, font=("Segoe UI", 9), justify="left", wraplength=320)
+        route_lbl.pack(anchor="w", padx=12, pady=(6, 0))
+        self.lookup_route(a, route_lbl)
+        bar = tk.Frame(win, bg=BG)
+        bar.pack(fill="x", padx=8, pady=8)
+        btn = dict(bg=PANEL, fg=FG, relief="flat", activebackground="#2c3a4a", font=("Segoe UI", 9))
+        tk.Button(bar, text="Track on adsb.fi", **btn,
+                  command=lambda: webbrowser.open(f"https://globe.adsb.fi/?icao={a['hex'].lstrip('~')}")).pack(side="left")
+        tk.Button(bar, text="Close", command=win.destroy, **btn).pack(side="right")
+        win.bind("<Escape>", lambda e: win.destroy())
+
     def refresh_online(self):
         self.online_busy = True
         self.online_last = time.time()
@@ -3245,6 +3882,215 @@ class App:
         self.map.fit_bounding_box((max(lats) + pad, min(lons) - pad), (min(lats) - pad, max(lons) + pad))
 
     # ---------- drone track ----------
+    def note_drone_ping(self, text, t=None, detector=None, live=True):
+        """Remember a drone ping: latest position per drone, its pilot, and every detector that heard it.
+        Returns False when it's the same ping another detector already reported (so the track isn't doubled)."""
+        mt = DRONE_RE.search(text or "")
+        if not mt:
+            return True
+        try:
+            rssi = int(mt.group(2))
+            dlat, dlon = float(mt.group(3)), float(mt.group(4))
+            plat, plon = float(mt.group(5)), float(mt.group(6))
+        except (TypeError, ValueError):
+            return True
+        if not (-90 <= dlat <= 90 and -180 <= dlon <= 180):
+            return True
+        t = float(t or time.time())
+        mac = mt.group(1).lower()
+        d = self.drone_seen.get(mac)
+        dup = bool(d and abs(t - d["t"]) <= PING_DUP_SECS and (round(d["lat"], 5), round(d["lon"], 5)) == (
+            round(dlat, 5), round(dlon, 5)))
+        if d is None:
+            d = self.drone_seen[mac] = {"mac": mac, "vendor": oui_vendor(mac), "first": t, "pings": 0,
+                                        "detectors": {}}
+        extras = drone_extras(text)
+        if not dup:
+            d.update(lat=dlat, lon=dlon, t=max(t, d.get("t", 0)), rssi=rssi, pings=d["pings"] + 1)
+            d.update(extras)
+            if -90 <= plat <= 90 and -180 <= plon <= 180 and (plat, plon) != (0.0, 0.0):
+                d["pilot"] = (plat, plon)
+        if detector:
+            d["detectors"][detector] = (t, rssi)
+        self.ping_log.append({"t": t, "mac": mac, "lat": dlat, "lon": dlon, "rssi": rssi,
+                              "plat": plat, "plon": plon, "det": detector, "dup": dup,
+                              "agl": extras.get("agl_m"), "alt": extras.get("alt_m")})
+        if len(self.ping_log) > 20000:
+            self.ping_log = self.ping_log[-15000:]
+        return not dup
+
+    def replay_pings(self):
+        """Rebuild today's drone history from the message log at start-up (no alerts), so reports and
+        the map know about flights from before the app was opened."""
+        start = datetime.datetime.combine(datetime.date.today(), datetime.time()).timestamp()
+        for line in tail_lines(LOG_PATH, 6000, chunk=4 * 1024 * 1024):
+            if "Drone:" not in line:
+                continue
+            try:
+                m = json.loads(line)
+                if float(m.get("t", 0)) >= start:
+                    self.note_drone_ping(m.get("text", ""), m.get("t"), m.get("fid"), live=False)
+            except (ValueError, TypeError, AttributeError):
+                pass
+
+    def fresh_drones(self, now=None):
+        now = now or time.time()
+        return [d for d in self.drone_seen.values() if "lat" in d and now - d["t"] <= DRONE_FRESH_SECS]
+
+    def draw_drones_main(self):
+        """Drones in the air right now also show on the main map (red), so they sit beside aircraft and nodes."""
+        if not self.map:
+            return
+        fresh = {d["mac"]: d for d in self.fresh_drones()}
+        for mac in [k for k in self.dm_markers if k not in fresh]:
+            self.dm_markers.pop(mac).delete()
+        for mac, d in fresh.items():
+            label = f"Drone {d['vendor'] or mac[-8:]}"
+            mk = self.dm_markers.get(mac)
+            if mk is None:
+                self.dm_markers[mac] = self.map.set_marker(
+                    d["lat"], d["lon"], text=label, text_color=BAD, font=("Segoe UI", 8, "bold"),
+                    icon=self.map.pin("#ff4040", "#400000"), icon_anchor="s",
+                    command=lambda m: self.banner_to_map())
+            elif mk.position != (d["lat"], d["lon"]):
+                mk.set_position(d["lat"], d["lon"])
+
+    def check_conflicts(self, now=None):
+        """Warn when a drone that's in the air now is close to a low-flying aircraft."""
+        now = now or time.time()
+        drones = self.fresh_drones(now)
+        if not drones or not self.aircraft:
+            return []
+        found = []
+        for d in drones:
+            for a in self.aircraft.values():
+                if a["ground"] or a["alt"] is None or a["alt"] > CONFLICT_ALT_FT:
+                    continue
+                dist = km_between((d["lat"], d["lon"]), (a["lat"], a["lon"]))
+                if dist > CONFLICT_KM:
+                    continue
+                if d.get("alt_m") is not None and abs(a["alt"] - d["alt_m"] * 3.281) > 1500:
+                    continue  # both altitudes known and far apart vertically
+                found.append((d, a, dist))
+                key = (d["mac"], a["hex"])
+                if now - self.conflict_seen.get(key, 0) < CONFLICT_REPEAT:
+                    continue
+                self.conflict_seen[key] = now
+                self.conflicts.append({"t": now, "mac": d["mac"], "vendor": d["vendor"], "hex": a["hex"],
+                                       "call": a["call"], "desc": a["desc"] or a["type"], "heli": a["heli"],
+                                       "alt": a["alt"], "km": round(dist, 2)})
+                self.conflicts = self.conflicts[-500:]
+                what = ("helicopter " if a["heli"] else "aircraft ") + a["call"]
+                text = (f"⚠ CONFLICT: drone {d['vendor'] or d['mac']} is {dist:.1f} km ({dist * 0.621371:.1f} mi) "
+                        f"from {what} at {a['alt']:,} ft")
+                log.warning("Drone/aircraft conflict: %s %.2f km from %s at %s ft", d["mac"], dist, a["call"], a["alt"])
+                self.panel_write("drone", [(f"{datetime.datetime.now().strftime('%m/%d %H:%M')}  {text}" + chr(10), "bad")])
+                if self.cfg["sound"]:
+                    alert(self.cfg)
+                if self.push:
+                    self.push.add("Central Finite Curve", text, drone=True)
+                self.banner_lbl.config(text=text + "   ·   " + datetime.datetime.now().strftime("%H:%M:%S"))
+                if not self.banner.winfo_ismapped():
+                    self.banner_pings = 0
+                    self.banner.pack(fill="x", padx=8, pady=(0, 6), after=self.top_bar)
+                if self.banner_job:
+                    self.root.after_cancel(self.banner_job)
+                self.banner_job = self.root.after(DRONE_BANNER_SECS * 1000, self.hide_banner)
+        return found
+
+    def make_report(self):
+        """Write an incident report for the most recent drone flight: a self-contained web page with the
+        timeline, positions, detectors, aircraft conflicts and a map picture. Opens in the browser,
+        where it can be printed or saved as PDF."""
+        import base64
+        import html as _html
+        if not self.ping_log:
+            self.note("Incident report: no drone pings recorded yet.", "dm")
+            return None
+        mac = self.ping_log[-1]["mac"]
+        pings = [p for p in self.ping_log if p["mac"] == mac]
+        flight = [pings[-1]]
+        for p in reversed(pings[:-1]):  # walk back until a gap of 10+ minutes: that's where this flight began
+            if flight[-1]["t"] - p["t"] > 600:
+                break
+            flight.append(p)
+        flight.reverse()
+        uniq = [p for p in flight if not p["dup"]]
+        start, end = flight[0]["t"], flight[-1]["t"]
+        fmt = lambda t: datetime.datetime.fromtimestamp(t).strftime("%Y-%m-%d %H:%M:%S")
+        dets = {}
+        for p in flight:
+            if p["det"]:
+                dets.setdefault(p["det"], []).append(p["rssi"])
+        name = lambda nid: self.history.get(nid, {}).get("name") or (self.name(nid) if self.iface else nid)
+        home = self.home()
+        near = min((km_between(home, (p["lat"], p["lon"])) for p in uniq), default=None) if home else None
+        pilots = sorted({(round(p["plat"], 5), round(p["plon"], 5)) for p in flight if (p["plat"], p["plon"]) != (0.0, 0.0)})
+        confl = [c for c in self.conflicts if c["mac"] == mac and start - 60 <= c["t"] <= end + DRONE_FRESH_SECS]
+        rssis = [p["rssi"] for p in uniq]
+        e = lambda v: _html.escape(str(v), quote=True)  # everything from the air or the mesh is untrusted text
+        gm = lambda la, lo: f"https://www.google.com/maps?q={la:.6f},{lo:.6f}"
+        img = ""
+        try:
+            os.makedirs(FLIGHTS_DIR, exist_ok=True)
+            tmp = os.path.join(FLIGHTS_DIR, "_report_map.png")
+            if self.save_map_image(tmp):
+                with open(tmp, "rb") as f:
+                    img = base64.b64encode(f.read()).decode("ascii")
+                os.remove(tmp)
+        except OSError:
+            pass
+        height = lambda p: f"{p['agl'] * 3.281:.0f} ft" if p.get("agl") is not None else ""
+        rows = "".join(
+            f"<tr><td>{e(fmt(p['t']))}</td><td><a href='{e(gm(p['lat'], p['lon']))}'>{p['lat']:.6f}, {p['lon']:.6f}</a></td>"
+            f"<td>{p['plat']:.6f}, {p['plon']:.6f}</td><td>{e(height(p))}</td>"
+            f"<td>{p['rssi']}</td><td>{e(name(p['det']) if p['det'] else '')}</td></tr>"
+            for p in uniq)
+        crow = "".join(
+            f"<tr><td>{e(fmt(c['t']))}</td><td>{e(('Helicopter ' if c['heli'] else '') + c['call'])}</td><td>{e(c['desc'])}</td>"
+            f"<td>{c['alt']:,} ft</td><td>{c['km']:.2f} km ({c['km'] * 0.621371:.2f} mi)</td></tr>" for c in confl)
+        summary = [
+            ("Drone ID (MAC)", mac), ("Manufacturer", self.drone_seen.get(mac, {}).get("vendor") or "unknown"),
+            ("Remote ID serial", self.drone_seen.get(mac, {}).get("serial") or "not reported by the detector"),
+            ("Highest above ground", (f"{max(p['agl'] for p in uniq if p.get('agl') is not None) * 3.281:.0f} ft"
+                                      if any(p.get("agl") is not None for p in uniq) else "not reported by the detector")),
+            ("First ping", fmt(start)), ("Last ping", fmt(end)),
+            ("Duration", f"{(end - start) / 60:.1f} minutes"), ("Pings", f"{len(uniq)}"),
+            ("Signal (RSSI)", f"{min(rssis)} to {max(rssis)} dBm" if rssis else ""),
+            ("Closest to your home location", f"{near:.2f} km ({near * 0.621371:.2f} mi)" if near is not None else "home location not set"),
+            ("Pilot position(s) reported", "; ".join(f"{a:.6f}, {b:.6f}" for a, b in pilots[:10]) or "none"),
+            ("Detectors that heard it", ", ".join(f"{name(d)} ({len(v)} pings, best {max(v)} dBm)" for d, v in dets.items()) or "unknown"),
+            ("Aircraft conflicts", str(len(confl)) if confl else "none recorded"),
+            ("Airspace", "; ".join(sorted({h["what"] for h in self.airspace_hits
+                                           if h["mac"] == mac and start - 60 <= h["t"] <= end + DRONE_FRESH_SECS}))
+             or "no FAA zones flagged (or airspace data not downloaded)"),
+        ]
+        srows = "".join(f"<tr><th>{e(k)}</th><td>{e(v)}</td></tr>" for k, v in summary)
+        page = f"""<!doctype html><meta charset="utf-8"><title>Drone incident report {e(fmt(start))}</title>
+<style>body{{font:14px/1.5 Segoe UI,system-ui,sans-serif;max-width:900px;margin:24px auto;padding:0 16px;color:#111}}
+h1{{font-size:22px;margin:0 0 4px}}h2{{font-size:16px;margin:24px 0 8px}}table{{border-collapse:collapse;width:100%}}
+th,td{{text-align:left;border-bottom:1px solid #ddd;padding:4px 8px;vertical-align:top}}th{{width:240px;color:#444}}
+.muted{{color:#666;font-size:12px}}img{{max-width:100%;border:1px solid #ccc}}</style>
+<h1>Drone incident report</h1><p class="muted">Made by Central Finite Curve {e(VERSION)} on {e(fmt(time.time()))}.
+Positions are what the drone broadcast over Remote ID, as received by your detectors; they are not independently verified.
+Height is shown only when the detector includes it in its alerts.</p>
+<h2>Summary</h2><table>{srows}</table>
+{f'<h2>Map</h2><img alt="Flight map" src="data:image/png;base64,{img}">' if img else ''}
+{f'<h2>Aircraft conflicts</h2><table><tr><th>Time</th><th>Aircraft</th><th>Type</th><th>Altitude</th><th>Distance from drone</th></tr>{crow}</table>' if confl else ''}
+<h2>Every ping</h2><table><tr><th>Time</th><th>Drone position</th><th>Pilot position</th><th>Height</th><th>RSSI</th><th>Detector</th></tr>{rows}</table>
+<h2>Where to report it</h2><p>In the US, unsafe or illegal drone flights can be reported to your local police (non-emergency line,
+or 911 if someone is in danger) and to the nearest FAA Flight Standards District Office. Attach this page, or print it to PDF.</p>"""
+        path = os.path.join(FLIGHTS_DIR, f"report-{time.strftime('%Y%m%d-%H%M%S', time.localtime(start))}.html")
+        try:
+            with open(path, "w", encoding="utf-8") as f:
+                f.write(page)
+        except OSError:
+            self.note("Incident report: couldn't write the file.", "dm")
+            return None
+        self.note(f"Incident report saved: {os.path.basename(path)} (opening it in your browser)", "me")
+        webbrowser.open("file:///" + path.replace("\\", "/"))
+        return path
+
     def show_banner(self, text):
         """Red DRONE DETECTED banner under the top buttons; it stays while pings keep coming and
         hides itself DRONE_BANNER_SECS after the last one (or when dismissed)."""
@@ -3257,6 +4103,12 @@ class App:
         if mt:
             vendor = oui_vendor(mt.group(1))
             detail = f"   {vendor + ' · ' if vendor else ''}{mt.group(1)}   RSSI {mt.group(2)} dBm"
+            seen = self.drone_seen.get(mt.group(1).lower()) or {}
+            if seen.get("agl_m") is not None:
+                detail += f"   {seen['agl_m'] * 3.281:.0f} ft up"
+            dets = len(seen.get("detectors", {}))
+            if dets > 1:
+                detail += f"   · heard by {dets} detectors"
         when = datetime.datetime.now().strftime("%H:%M:%S")
         pings = f"{self.banner_pings} ping{'s' if self.banner_pings != 1 else ''}"
         self.banner_lbl.config(text=f"⚠ DRONE DETECTED{detail}   ·   {pings}, last {when}")
@@ -3332,8 +4184,10 @@ class App:
         if getattr(self, "track_lbl", None):
             last_pt = self.track[-1]
             ven = last_pt[5] or "unknown mfr"
+            dets = len((self.drone_seen.get(str(last_pt[4] or "").lower()) or {}).get("detectors", {}))
             self.track_lbl.configure(
-                text=f"{len(self.track)} pings · {ven} · RSSI {last_pt[2]} dBm")
+                text=f"{len(self.track)} pings · {ven} · RSSI {last_pt[2]} dBm"
+                     + (f" · {dets} detectors" if dets > 1 else ""))
         # centre once on the first point; after that leave the view where the user left it
         if center_first and len(pts) == 1:
             self.dmap.set_position(*last)
@@ -3631,10 +4485,13 @@ class App:
         keep = tk.StringVar(value=keep_label)
         row(11, "Keep chat archive", ttk.Combobox(win, textvariable=keep, state="readonly", width=22,
                                                   values=list(keep_map)))
+        ac_nm = tk.StringVar(value=str(self.cfg.get("aircraft_nm", AIRCRAFT_NM)))
+        row(12, "Aircraft: at least (nautical mi)", tk.Entry(win, textvariable=ac_nm, bg=PANEL, fg=FG,
+                                                          insertbackground=FG))
 
         # Phone alerts (ntfy): topic, what to send, and a test button
         tk.Label(win, text="PHONE ALERTS (ntfy)", bg=BG, fg=DIM, font=("Segoe UI", 8, "bold")).grid(
-            row=12, column=0, sticky="w", padx=10, pady=(12, 0))
+            row=13, column=0, sticky="w", padx=10, pady=(12, 0))
         push_topic = tk.StringVar(value=self.cfg.get("push_url", ""))
         prow = tk.Frame(win, bg=BG)
         tk.Entry(prow, textvariable=push_topic, bg=PANEL, fg=FG, insertbackground=FG, width=34).pack(
@@ -3645,11 +4502,11 @@ class App:
                                                           for _ in range(16)))
         tk.Button(prow, text="New private topic", command=new_topic, bg=PANEL, fg=FG, relief="flat",
                   font=("Segoe UI", 8)).pack(side="left", padx=(6, 0))
-        row(13, "Topic or ntfy link\n(blank = off)", prow)
+        row(14, "Topic or ntfy link\n(blank = off)", prow)
         push_modes = dict((label, key) for key, label in PUSH_MODES)
         push_mode = tk.StringVar(value=next((l for k, l in PUSH_MODES if k == self.cfg.get("push_mode", "drone")),
                                             PUSH_MODES[0][1]))
-        row(14, "Send to phone", ttk.Combobox(win, textvariable=push_mode, state="readonly", width=30,
+        row(15, "Send to phone", ttk.Combobox(win, textvariable=push_mode, state="readonly", width=30,
                                               values=list(push_modes)))
         trow = tk.Frame(win, bg=BG)
         push_result = tk.Label(trow, text="Subscribe to the same topic in the ntfy app, then test.",
@@ -3672,7 +4529,7 @@ class App:
         tk.Button(trow, text="Send test", command=push_test, bg=PANEL, fg=FG, relief="flat",
                   font=("Segoe UI", 9)).pack(side="left")
         push_result.pack(side="left", padx=(8, 0))
-        trow.grid(row=15, column=1, sticky="we", padx=10, pady=(0, 6))
+        trow.grid(row=16, column=1, sticky="we", padx=10, pady=(0, 6))
 
         def apply():
             before = (self.cfg["mode"], self.cfg["port"], self.cfg["host"])
@@ -3685,6 +4542,13 @@ class App:
                 self.push = PhonePush(url) if url and not DEMO else None
                 log.info("Phone alerts %s", "turned on" if url else "turned off")
             self.cfg["push_mode"] = push_modes.get(push_mode.get(), "drone")
+            try:
+                nm = min(250, max(1, int(float(ac_nm.get()))))
+                if nm != self.cfg.get("aircraft_nm", AIRCRAFT_NM):
+                    self.cfg["aircraft_nm"] = nm
+                    self.ac_next = 0  # fetch again with the new radius
+            except ValueError:
+                pass
             new_keep = keep_map.get(keep.get(), keep_now)
             if new_keep != keep_now:
                 self.cfg["archive_days"] = new_keep
@@ -3741,9 +4605,9 @@ class App:
                 self.set_status("Settings saved — reconnecting…", WARN)
 
         tk.Button(win, text="Save", command=apply, bg=ACCENT, fg="#000", relief="flat",
-                  width=10).grid(row=16, column=1, sticky="e", padx=10, pady=10)
+                  width=10).grid(row=17, column=1, sticky="e", padx=10, pady=10)
         tk.Button(win, text="Send feedback…", command=self.open_feedback, bg=PANEL, fg=FG, relief="flat",
-                  font=("Segoe UI", 9)).grid(row=16, column=0, sticky="w", padx=10, pady=10)
+                  font=("Segoe UI", 9)).grid(row=17, column=0, sticky="w", padx=10, pady=10)
         snd_box.bind("<<ComboboxSelected>>", lambda e: test())  # preview on pick
         win.protocol("WM_DELETE_WINDOW", apply)  # closing with X keeps changes too
 

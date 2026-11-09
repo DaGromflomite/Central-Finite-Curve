@@ -216,6 +216,62 @@ class Files(unittest.TestCase):
         self.assertLessEqual(len(url), mw.FEEDBACK_URL_MAX)
         self.assertIn("shortened", url)
 
+    def test_parse_aircraft(self):
+        data = {"ac": [
+            {"hex": "a90af0", "flight": "N682D   ", "r": "N682D", "t": "H25B", "category": "A2",
+             "alt_baro": 2400, "gs": 120.5, "track": 90, "lat": 41.9, "lon": -79.9, "seen_pos": 2},
+            {"hex": "abc123", "flight": "", "r": "N1HE", "t": "EC35", "category": "A7",
+             "alt_baro": "ground", "lat": 41.8, "lon": -79.8, "seen_pos": 1, "squawk": "7700"},
+            {"hex": "dead00", "lat": 41.0, "lon": -79.0, "seen_pos": 300},     # stale position: dropped
+            {"hex": "<script>", "lat": 41.0, "lon": -79.0},                    # bad id: dropped
+            {"hex": "beef01"}]}                                                  # no position: dropped
+        out = mw.parse_aircraft(data)
+        self.assertEqual([a["hex"] for a in out], ["a90af0", "abc123"])
+        self.assertEqual(out[0]["call"], "N682D")
+        self.assertEqual(out[0]["alt"], 2400)
+        self.assertTrue(out[1]["ground"] and out[1]["heli"])
+        self.assertEqual(out[1]["emergency"], "emergency")
+        self.assertEqual(mw.parse_aircraft({}), [])
+
+    def test_point_in_rings(self):
+        square = [[(0, 0), (0, 10), (10, 10), (10, 0)]]
+        with_hole = [square[0], [(4, 4), (4, 6), (6, 6), (6, 4)]]
+        self.assertTrue(mw.point_in_rings(5, 5, square))
+        self.assertFalse(mw.point_in_rings(15, 5, square))
+        self.assertFalse(mw.point_in_rings(5, 5, with_hole))
+        self.assertTrue(mw.point_in_rings(2, 2, with_hole))
+        g = {"type": "MultiPolygon", "coordinates": [[[[0, 0], [10, 0], [10, 10], [0, 10]]]]}
+        self.assertEqual(mw.geojson_rings(g)[0][0][1], (0, 10))  # GeoJSON is lon,lat; we use lat,lon
+
+    def test_parse_tfr_xml(self):
+        xml = ("<XNOTAM><txtLocalName>Wildfire near Testville</txtLocalName><valDistVerLower>0</valDistVerLower>"
+               "<valDistVerUpper>8000</valDistVerUpper><dateEffective>2026-11-08T12:00:00</dateEffective>"
+               "<dateExpire>2026-11-09T12:00:00</dateExpire><abdMergedArea>"
+               "<Avx><geoLat>41.90N</geoLat><geoLong>080.00W</geoLong></Avx>"
+               "<Avx><geoLat>42.00N</geoLat><geoLong>080.00W</geoLong></Avx>"
+               "<Avx><geoLat>42.00N</geoLat><geoLong>079.90W</geoLong></Avx>"
+               "<Avx><geoLat>41.90N</geoLat><geoLong>079.90W</geoLong></Avx></abdMergedArea></XNOTAM>")
+        t = mw.parse_tfr_xml(xml)
+        self.assertEqual(t["name"], "Wildfire near Testville")
+        self.assertEqual(t["polys"][0][0][0], (41.9, -80.0))
+        self.assertTrue(mw.point_in_rings(41.95, -79.95, t["polys"][0]))
+        self.assertLess(t["start"], t["end"])
+        self.assertIsNone(mw.parse_tfr_xml("<XNOTAM></XNOTAM>"))
+
+    def test_drone_extras(self):
+        text = ("Drone: aa:bb:cc:dd:ee:ff RSSI:-70 https://maps.google.com/?q=41.9,-79.9 "
+                "ALT:412m AGL:150m SPD:12m/s ID:1581F5FJD239C00DW22E")
+        self.assertEqual(mw.drone_extras(text), {"alt_m": 412.0, "agl_m": 150.0, "speed_ms": 12.0,
+                                                 "serial": "1581F5FJD239C00DW22E"})
+        self.assertEqual(mw.drone_extras("Drone: aa:bb:cc:dd:ee:ff RSSI:-70"), {})  # old detectors: nothing
+
+    def test_route_plausible(self):
+        route = {"_airports": [{"lat": 40.64, "lon": -73.78}, {"lat": 51.47, "lon": -0.46}]}  # JFK -> LHR
+        self.assertTrue(mw.route_plausible(route, 45.0, -55.0))     # over the Atlantic, on the way
+        self.assertFalse(mw.route_plausible(route, 34.0, -118.0))   # over Los Angeles: stale/reused callsign
+        self.assertFalse(mw.route_plausible({}, 45.0, -55.0))
+        self.assertTrue(mw.ROUTE_RE.match("AAL100") and not mw.ROUTE_RE.match("N682D"))
+
     def test_prune_history(self):
         now = time.time()
         h = {"!old": {"last": now - 400 * 86400}, "!new": {"last": now}, "!none": {}}
@@ -670,6 +726,7 @@ class Gui(unittest.TestCase):
             app.dest.set(dm[0])
             app.entry.insert(0, "regression test")
             app.send()
+            r["dm_pid"] = list(app.pending)[-1] if app.pending else None
             r["sent"] = time.time()
 
         def untimed_node(app, root, r):
@@ -692,6 +749,7 @@ class Gui(unittest.TestCase):
             del app.iface.nodes["!05a1e000"]
             # every pin on the map can be messaged, even ones the radio doesn't know (internet-map nodes)
             lat, lon = app.home() or (41.94, -79.98)
+            app.cfg["online_nodes"] = True  # don't depend on the tester's own map settings
             app.online["!0e7e7e7e"] = {"name": "Web Only", "lat": lat + 0.05, "lon": lon + 0.05, "acc": 0,
                                        "role": "CLIENT", "seen": now - 600}
             app.update_map()
@@ -846,6 +904,81 @@ class Gui(unittest.TestCase):
             r["pushed"] = pushed
             app.push = None
             app.cfg["push_mode"] = "drone"
+            # airspace: two detectors hear the same drone; a low helicopter flies close by
+            now = time.time()
+            app.history["!0de7ec70"] = {"name": "<script>alert(1)</script>", "first": now, "last": now, "count": 1}
+            dlat, dlon = 41.95, -79.97
+            alert_text = (f"Drone: 60:60:1f:aa:bb:cc RSSI:-70 https://maps.google.com/?q={dlat},{dlon}" + chr(13) + chr(10)
+                          + "Pilot: https://maps.google.com/?q=41.94,-79.98" + chr(13) + chr(10))
+            for pid, det in ((991001, "!0de7ec70"), (991002, "!02ed677c")):
+                app.handle_packet({"fromId": det, "id": pid, "to": 0xFFFFFFFF, "channel": 0, "rxTime": now,
+                                   "decoded": {"portnum": "TEXT_MESSAGE_APP", "text": alert_text}}, app.iface)
+            d = app.drone_seen["60:60:1f:aa:bb:cc"]
+            r["two_detectors"] = len(d["detectors"]) == 2 and d["pings"] == 1
+            r["drone_on_main_map"] = "60:60:1f:aa:bb:cc" in app.dm_markers
+            app.aircraft = {a["hex"]: a for a in mw.parse_aircraft({"ac": [
+                {"hex": "a1b2c3", "flight": "LIFE1", "category": "A7", "alt_baro": 1500, "track": 45,
+                 "lat": dlat + 0.01, "lon": dlon + 0.01, "seen_pos": 1},
+                {"hex": "a1b2c4", "flight": "HIGH1", "alt_baro": 30000, "lat": dlat, "lon": dlon, "seen_pos": 1},
+                {"hex": "a1b2c5", "flight": "FAR1", "alt_baro": 1000, "lat": dlat + 1, "lon": dlon, "seen_pos": 1}]})}
+            app.draw_aircraft()
+            found = app.check_conflicts()
+            mine = "60:60:1f:aa:bb:cc"
+            r["conflicts"] = sorted({a["call"] for dd, a, _ in found if dd["mac"] == mine})
+            r["conflict_shown"] = "CONFLICT" in app.banner_lbl["text"]
+            app.check_conflicts()  # again straight away: must not warn a second time
+            r["conflict_once"] = sum(1 for c in app.conflicts if c["mac"] == mine) == 1
+            reports = []
+            real_open = mw.webbrowser.open
+            mw.webbrowser.open = lambda url: reports.append(url)
+            try:
+                path = app.make_report()
+            finally:
+                mw.webbrowser.open = real_open
+            page = ""
+            if path:
+                with open(path, encoding="utf-8") as fh:
+                    page = fh.read()
+            r["report_ok"] = bool(path) and "LIFE1" in page and "60:60:1f:aa:bb:cc" in page and reports
+            r["report_escaped"] = "<script>alert(1)</script>" not in page and "&lt;script&gt;" in page
+            if path:
+                os.remove(path)
+            high = (f"Drone: 60:60:1f:aa:bb:dd RSSI:-66 https://maps.google.com/?q={dlat + 0.5},{dlon + 0.5} "
+                    "ALT:700m AGL:200m SPD:9m/s ID:TESTSERIAL1" + chr(13) + chr(10)
+                    + "Pilot: https://maps.google.com/?q=41.94,-79.98" + chr(13) + chr(10))
+            app.handle_packet({"fromId": "!02ed677c", "id": 991010, "to": 0xFFFFFFFF, "channel": 0, "rxTime": now,
+                               "decoded": {"portnum": "TEXT_MESSAGE_APP", "text": high}}, app.iface)
+            r["high_flagged"] = any("over the 400 ft limit" in h["what"] for h in app.airspace_hits
+                                    if h["mac"] == "60:60:1f:aa:bb:dd")
+            r["serial_kept"] = app.drone_seen["60:60:1f:aa:bb:dd"].get("serial") == "TESTSERIAL1"
+            # airspace: the same live drone sits inside a no-fly zone and an airport's Class D
+            box = [[(dlat - 0.05, dlon - 0.05), (dlat + 0.05, dlon - 0.05), (dlat + 0.05, dlon + 0.05),
+                    (dlat - 0.05, dlon + 0.05)]]
+            far = [[(dlat + 1, dlon + 1), (dlat + 1.1, dlon + 1), (dlat + 1.1, dlon + 1.1)]]
+            app.airspace = {"zones": [{"name": "TEST CLASS D", "type": "CLASS_D", "lower": 0, "upper": 3200,
+                                       "polys": [box]}],
+                            "grid": [{"ceil": 100, "apt": "Test Field", "polys": [box]}],
+                            "tfr": {"9/9999": {"name": "Test wildfire", "lower": "0", "upper": "8000",
+                                               "start": now - 60, "end": now + 3600, "polys": [box]},
+                                    "9/9998": {"name": "High TFR", "lower": "9000", "upper": "17999",
+                                               "start": now - 60, "end": now + 3600, "polys": [box]},
+                                    "9/9997": {"name": "Far TFR", "lower": "0", "upper": "5000",
+                                               "start": now - 60, "end": now + 3600, "polys": [far]}},
+                            "zones_at": now, "tfr_at": now, "center": [dlat, dlon]}
+            app.cfg["airspace_on"] = True
+            app.draw_airspace()
+            r["airspace_drawn"] = len(app.as_shapes) >= 4
+            hits = {k for dd, k, _ in app.check_airspace() if dd["mac"] == mine}
+            r["airspace_hits"] = sorted(hits)
+            r["airspace_banner"] = "AIRSPACE" in app.banner_lbl["text"]
+            app.cfg["airspace_on"] = False
+            app.draw_airspace()
+            r["airspace_cleared"] = app.as_shapes == []
+            app.airspace = {}
+            app.aircraft = {}
+            app.draw_aircraft()
+            app.hide_banner()
+            del app.history["!0de7ec70"]
             # feedback form: opens, builds a report with details, never sends anything by itself
             opened = []
             real_open = mw.webbrowser.open
@@ -866,8 +999,8 @@ class Gui(unittest.TestCase):
             app.hide_banner()
 
         def lose_radio(app, root, r):
-            r["delivered"] = "delivered to Chatty" in app.msgs.get("1.0", "end") or \
-                             "not delivered to Chatty" in app.msgs.get("1.0", "end")
+            # the radio's delivery report (delivered or not) was received and matched to our message
+            r["delivered"] = r.get("dm_pid") is not None and r["dm_pid"] not in app.pending
             mw.pub.sendMessage("meshtastic.connection.lost", interface=app.iface)
             r["lost_at"] = time.time()
 
@@ -908,6 +1041,20 @@ class Gui(unittest.TestCase):
         self.assertTrue(r["new_still_shows"], "a new message after archiving a conversation was hidden")
         self.assertTrue(r["archive_finds"], "the archive search didn't find a cleared message")
         self.assertTrue(r["archive_empty"], "Clear archive left messages on disk")
+        self.assertTrue(r["two_detectors"], "the same ping from two detectors wasn't merged into one")
+        self.assertTrue(r["drone_on_main_map"], "a live drone didn't appear on the main map")
+        self.assertEqual(r["conflicts"], ["LIFE1"], "conflict check picked the wrong aircraft")
+        self.assertTrue(r["conflict_shown"], "no conflict banner")
+        self.assertTrue(r["conflict_once"], "the same conflict warned twice")
+        self.assertTrue(r["report_ok"], "incident report missing or incomplete")
+        self.assertTrue(r["report_escaped"], "incident report let a node name inject HTML")
+        self.assertTrue(r["high_flagged"], "a drone reporting 650 ft above ground wasn't flagged")
+        self.assertTrue(r["serial_kept"], "the drone's Remote ID serial wasn't kept")
+        self.assertTrue(r["airspace_drawn"], "airspace outlines weren't drawn")
+        self.assertEqual(r["airspace_hits"], ["grid:Test Field", "tfr:Test wildfire", "zone:TEST CLASS D"],
+                         "airspace check found the wrong zones (high or far TFRs must not count)")
+        self.assertTrue(r["airspace_banner"], "a drone in a no-fly zone didn't raise the banner")
+        self.assertTrue(r["airspace_cleared"], "turning airspace off left outlines on the map")
         self.assertIn("issues/new", r["feedback_url"], "feedback didn't open a GitHub issue link")
         self.assertIn("map+pins+jump+around", r["feedback_url"])
         self.assertIn("App+version", r["feedback_url"], "feedback report is missing the app details")

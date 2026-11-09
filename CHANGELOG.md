@@ -1,5 +1,44 @@
 # Changelog
 
+## 0.5.0-alpha — 2026-11-08
+
+Central Finite Curve becomes an airspace-awareness tool: drones, aircraft and no-fly zones together.
+
+- **Aircraft on the map.** Tick *Show aircraft (adsb.fi)* on the Map tab to see planes and
+  helicopters near you as arrows pointing the way they're flying, with callsign and altitude.
+  Click one for its type, registration, speed, heading, squawk and distance, or to follow it on
+  adsb.fi. Emergencies (squawk 7500/7600/7700) show in red. It only downloads while a map is on
+  screen, every 15 seconds, and backs off if adsb.fi is busy. Radius in Settings.
+- **Drone / aircraft conflict alerts.** When a drone that's flying now is within 3 km of an aircraft
+  at or below 3,500 ft (a medical helicopter, a crop duster, a plane on approach), you get a red
+  CONFLICT banner, a line in the Drone panel, a sound, and a phone alert if those are on. Each
+  drone/aircraft pair warns at most once every 5 minutes.
+- **Airspace and no-fly zones (US).** Tick *Show airspace & no-fly zones (FAA, US)* to outline airport
+  airspace (Class B, C, D and E surface areas) and active temporary flight restrictions (red), from
+  the FAA's own open data. Click an outline for details. A drone flying inside a no-fly zone raises
+  the banner and a phone alert; a drone in controlled airspace near an airport is noted in the
+  Drone panel, along with the FAA's maximum altitude for that spot. Zones are downloaded about once
+  a day and kept on disk; the restriction list is checked every 30 minutes.
+- **Where airline flights are going.** The aircraft card shows the flight's usual route (for example
+  ORD Chicago → BOS Boston), looked up once per callsign from the free VRS route database, and only
+  when the plane is actually somewhere between those two airports. Private planes have no route.
+- **Drone altitude, when the detector sends it.** If a detector adds `ALT:` (above sea level),
+  `AGL:` (above the ground), `SPD:` and `ID:` (the Remote ID serial) to its alerts, Central Finite
+  Curve uses them: the banner shows the height, drones above 400 ft are flagged, conflicts compare
+  altitudes, and the incident report gets a height column and the serial. Older detectors keep
+  working exactly as before. (Mesh-Detect's stock firmware decodes these already but doesn't put
+  them in its mesh messages yet; see the README.)
+- **Several detectors work as one.** When more than one detector hears the same drone, the pings
+  are merged into one track instead of doubling up, and the banner and Drone tab show how many
+  detectors heard it.
+- **Live drones on the main map.** Drones in the air right now show as red pins on the Map tab too,
+  next to aircraft and nodes.
+- **Incident report.** *Incident report* on the Drone tab writes a clean report of the latest
+  flight: when it started and ended, the drone's ID and maker, every position, the pilot's
+  reported position, how close it came to your home, which detectors heard it, any aircraft
+  conflicts and airspace it entered, and a map picture. It opens in your browser, ready to print or
+  save as PDF for the police or the FAA.
+
 ## 0.4.0-alpha — 2026-11-07
 
 - **Phone alerts are now set up in Settings.** A new *Phone alerts (ntfy)* section has a topic box,
