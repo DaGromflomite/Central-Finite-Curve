@@ -3,6 +3,7 @@
 Connects to one node over USB (serial) or Wi-Fi (TCP). Only one program can
 hold that connection, so use Pause before opening the Meshtastic app.
 """
+import atexit
 import collections
 import datetime
 import gzip
@@ -2577,7 +2578,7 @@ class App:
                     elif "filenotfound" in low or "cannot find" in low:
                         msg = f"node not plugged in ({self.target()})"
                     elif "timed out" in low or "timeout" in low:
-                        msg = "node not answering"
+                        msg = "node not answering — unplug & replug it, then press Reconnect"
                     elif "different radio" in low:
                         msg = data[:90]
                     else:
@@ -4682,6 +4683,10 @@ if __name__ == "__main__":
     root = tk.Tk()
     root.report_callback_exception = lambda *exc: log.error("UI callback failed", exc_info=exc)
     app = App(root)
+    # Safety net: if the app exits by any path that isn't the clean Quit (e.g. an
+    # unhandled error escaping the loop), still close the radio so the serial port
+    # is released. Does NOT cover a Task-Manager/force kill — nothing can.
+    atexit.register(lambda: getattr(app, "iface", None) and app.iface.close())
     if instance:
         threading.Thread(target=app.serve_instance, args=(instance,), daemon=True, name="single-copy").start()
     root.mainloop()
