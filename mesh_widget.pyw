@@ -3143,14 +3143,39 @@ class App:
                 poly = self.map.set_polygon(circle(lat, lon, acc), outline_color=ONLINE, fill_color=None,
                                             border_width=1)
                 self.acc_polys[nid] = (poly, ((lat, lon), acc))
+        # De-clutter overlapping name labels: when two nodes sit close on screen
+        # their text (drawn below each pin) piles on top of each other. Keep the
+        # freshest node of a cluster labelled and blank its close neighbours (their
+        # names are still in the pin card + the bottom bar). Screen spacing comes
+        # from web-mercator metres-per-pixel at the current zoom (same formula used
+        # above). LABEL_MIN_PX is the min pixel gap before a neighbour is hidden.
+        LABEL_MIN_PX = 26
+        crowded = set()
+        if round(self.map.zoom) >= 10:
+            z = 2 ** round(self.map.zoom)
+            kept = []  # (lat, lon) of nodes that keep their label
+            for nid in sorted(points, key=lambda n: (n != my_id, -points[n][5])):
+                lat, lon = points[nid][:2]
+                mpp = 156543.03 * math.cos(math.radians(lat)) / z  # metres/pixel here
+                overlaps = False
+                for klat, klon in kept:
+                    dlat_m = (lat - klat) * 111320.0
+                    dlon_m = (lon - klon) * 111320.0 * math.cos(math.radians((lat + klat) / 2))
+                    if mpp > 0 and math.hypot(dlat_m, dlon_m) / mpp < LABEL_MIN_PX:
+                        overlaps = True
+                        break
+                if overlaps:
+                    crowded.add(nid)
+                else:
+                    kept.append((lat, lon))
         for nid, (lat, lon, label, color, rep, _) in points.items():
             label = short.get(nid, label)
             m = self.markers.get(nid)
             outline = WARN if rep else PANEL
             if nid in self.unlocated:  # hollow pin: placed for visibility, not a real location
                 color, outline = PANEL, (WARN if rep else color)
-            if round(self.map.zoom) < 10 and nid != my_id:
-                label = ""  # zoomed out, labels pile into an unreadable blob; the bar and pin cards still name them
+            if (round(self.map.zoom) < 10 or nid in crowded) and nid != my_id:
+                label = ""  # zoomed out / overlapping: hide the name (still in the bar + pin card)
             if m and (m.marker_color_circle, m.marker_color_outside) != (color, outline):
                 m.delete()  # colours can't be changed in place
                 m = None
