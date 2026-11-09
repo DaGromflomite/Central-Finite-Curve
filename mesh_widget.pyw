@@ -1364,6 +1364,7 @@ class App:
     def __init__(self, root):
         self.root = root
         self.cfg = load_cfg()
+        self.names_on = bool(self.cfg.get("map_labels", True))  # map node/aircraft name text on/off
         self.q = queue.Queue()
         self.iface = None
         self.connecting = False
@@ -1702,6 +1703,10 @@ class App:
                            bd=0, padx=4).place(relx=1.0, x=-6, y=110, anchor="ne")
             tk.Button(f3, text="Clear map history", command=self.clear_map_history, bg=PANEL, fg=DIM,
                       relief="flat", font=("Segoe UI", 8)).place(relx=1.0, x=-6, y=136, anchor="ne")
+            self.names_var = tk.BooleanVar(value=self.names_on)
+            tk.Checkbutton(f3, text="Show names", variable=self.names_var, command=self.toggle_names,
+                           bg=PANEL, fg=FG, selectcolor=BG, activebackground=PANEL, activeforeground=FG,
+                           font=("Segoe UI", 8), relief="flat", bd=0, padx=4).place(relx=1.0, x=-6, y=160, anchor="ne")
             if self.cfg.get("airspace_on"):
                 self.root.after(1500, self.draw_airspace)
             # adsb.fi asks to be credited with a link whenever its data is shown
@@ -3174,7 +3179,9 @@ class App:
             outline = WARN if rep else PANEL
             if nid in self.unlocated:  # hollow pin: placed for visibility, not a real location
                 color, outline = PANEL, (WARN if rep else color)
-            if (round(self.map.zoom) < 10 or nid in crowded) and nid != my_id:
+            if not self.names_on:
+                label = ""  # names hidden by the "Show names" toggle — icons only
+            elif (round(self.map.zoom) < 10 or nid in crowded) and nid != my_id:
                 label = ""  # zoomed out / overlapping: hide the name (still in the bar + pin card)
             if m and (m.marker_color_circle, m.marker_color_outside) != (color, outline):
                 m.delete()  # colours can't be changed in place
@@ -3654,6 +3661,14 @@ class App:
             self.aircraft = {}
             self.draw_aircraft()
 
+    def toggle_names(self):
+        """Show/hide ALL node + aircraft name text on the map — the icons stay."""
+        self.names_on = bool(self.names_var.get())
+        self.cfg["map_labels"] = self.names_on
+        save_cfg(self.cfg)
+        self.update_map()
+        self.draw_aircraft()
+
     def plane_icon(self, track, colour, heli=False):
         """A top-down plane (or helicopter) silhouette turned the way it's heading, cached per 15 degrees.
         Drawn 4x large on a 22-unit grid, then shrunk for smooth edges."""
@@ -3702,7 +3717,7 @@ class App:
             for hexid, a in self.aircraft.items():
                 colour = BAD if a["emergency"] else AIRCRAFT
                 icon = self.plane_icon(a["track"], colour, a["heli"])
-                label = self.ac_label(a) if show_labels or a["emergency"] else ""
+                label = self.ac_label(a) if (self.names_on and (show_labels or a["emergency"])) else ""
                 mk = self.ac_markers.get((mid, hexid))
                 if mk is not None and getattr(mk, "ac_key", None) != (a["track"] and round(a["track"] / 15), colour):
                     mk.delete()
