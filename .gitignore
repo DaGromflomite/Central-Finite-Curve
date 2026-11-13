@@ -38,3 +38,4 @@ Thumbs.db
 docs/img/_live.png
 release/
 airspace-cache.json
+nodes-history-backup.json
