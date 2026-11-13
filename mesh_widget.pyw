@@ -61,20 +61,34 @@ import meshtastic.serial_interface
 import meshtastic.tcp_interface
 
 HERE = os.path.dirname(os.path.abspath(__file__))
-CFG_PATH = os.path.join(HERE, "config.json")
-LOG_PATH = os.path.join(HERE, "messages.jsonl")
-HIST_PATH = os.path.join(HERE, "nodes-history.json")
-AIRSPACE_PATH = os.path.join(HERE, "airspace-cache.json")  # FAA zones near you, refreshed daily
-DEBUG_LOG = os.path.join(HERE, "mesh_widget.log")  # errors and health, for debugging during testing
-OUI_PATH = os.path.join(HERE, "oui.txt")           # IEEE OUI table: first 3 MAC octets -> manufacturer
-FLIGHTS_DIR = os.path.join(HERE, "flights")        # saved drone flight logs + map snapshots
+# Where user data lives. When running from source it stays in the project folder (dev workflow).
+# When installed (frozen .exe) it MUST live in a stable per-user folder, NOT next to the .exe:
+# the installer/auto-update replaces the program folder on every update, which would otherwise wipe
+# the user's config, history and messages each time they update.
+if getattr(sys, "frozen", False):
+    _base = os.environ.get("LOCALAPPDATA") or os.environ.get("APPDATA") or os.path.expanduser("~")
+    DATA_DIR = os.path.join(_base, "Central Finite Curve")
+    try:
+        os.makedirs(DATA_DIR, exist_ok=True)
+    except OSError:
+        DATA_DIR = HERE  # last resort: fall back to the program folder
+else:
+    DATA_DIR = HERE
+CFG_PATH = os.path.join(DATA_DIR, "config.json")
+LOG_PATH = os.path.join(DATA_DIR, "messages.jsonl")
+HIST_PATH = os.path.join(DATA_DIR, "nodes-history.json")
+AIRSPACE_PATH = os.path.join(DATA_DIR, "airspace-cache.json")  # FAA zones near you, refreshed daily
+DEBUG_LOG = os.path.join(DATA_DIR, "mesh_widget.log")  # errors and health, for debugging during testing
+# oui.txt ships inside the app bundle (read-only), so it comes from the bundle, not the data folder.
+OUI_PATH = os.path.join(getattr(sys, "_MEIPASS", HERE), "oui.txt")  # IEEE OUI table: MAC -> manufacturer
+FLIGHTS_DIR = os.path.join(DATA_DIR, "flights")        # saved drone flight logs + map snapshots
 
 
 def asset_path(name):
     """Path to a bundled asset (icons), working from source and from a PyInstaller build."""
     base = getattr(sys, "_MEIPASS", HERE)
     return os.path.join(base, "assets", name)
-VERSION = "0.6.0-beta"
+VERSION = "0.6.1-beta"
 HEALTH_SECS = 600   # how often a health line (memory, CPU, nodes) goes into the log
 DEMO = False        # --demo: made-up nodes instead of a radio, with its own files (see enable_demo)
 log = logging.getLogger("centralfinitecurve")
@@ -1203,7 +1217,7 @@ def enable_demo(folder=None, extra_nodes=0):
     """Switch to made-up nodes with separate files, so a demo never touches real history, messages or settings."""
     global DEMO, CFG_PATH, LOG_PATH, HIST_PATH, AIRSPACE_PATH, FLIGHTS_DIR, DEBUG_LOG, HEALTH_SECS, DEMO_EXTRA
     DEMO, DEMO_EXTRA = True, extra_nodes
-    folder = folder or os.path.join(HERE, "demo")
+    folder = folder or os.path.join(DATA_DIR, "demo")
     os.makedirs(folder, exist_ok=True)
     real = load_cfg()
     CFG_PATH = os.path.join(folder, "demo-config.json")

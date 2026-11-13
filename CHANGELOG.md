@@ -1,10 +1,13 @@
 # Changelog
 
-## 0.6.0-beta — 2026-11-12
+## 0.6.1-beta — 2026-11-12
 
 First beta. The feature set is all here now, so from this release on the focus is stability —
 and **the app updates itself**: it checks GitHub for new versions and can download and install them
 for you (Settings ▸ Updates, or the tray menu). A big usability + connectivity update, plus a new look.
+
+Also fixes a data-persistence bug: the installed app now keeps your settings, history and messages
+in your user folder (`%LOCALAPPDATA%`), so **they survive updates** instead of being replaced each time.
 
 - **Bluetooth (BLE) connection.** You can now connect to a Meshtastic radio wirelessly over
   Bluetooth instead of a USB cable or Wi-Fi. In *Settings ▸ Connect by* choose **Bluetooth**, click
