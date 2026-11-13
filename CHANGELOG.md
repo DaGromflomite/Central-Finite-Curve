@@ -1,5 +1,46 @@
 # Changelog
 
+## 0.6.0-beta — 2026-11-12
+
+First beta. The feature set is all here now, so from this release on the focus is stability —
+and **the app updates itself**: it checks GitHub for new versions and can download and install them
+for you (Settings ▸ Updates, or the tray menu). A big usability + connectivity update, plus a new look.
+
+- **Bluetooth (BLE) connection.** You can now connect to a Meshtastic radio wirelessly over
+  Bluetooth instead of a USB cable or Wi-Fi. In *Settings ▸ Connect by* choose **Bluetooth**, click
+  **Scan** to find nearby radios (power the radio on and unpair it from phones first), pick one and
+  Save. Leave the address blank to use the nearest radio.
+- **Automatic updates.** Central Finite Curve checks GitHub for a newer release about once a day
+  (toggle in *Settings ▸ Updates*) and tells you when one is out. Click **Download & install update**
+  in Settings or the tray menu and it fetches the installer and runs it for you. From a source
+  checkout it just opens the releases page.
+- **Full-screen mode.** A ⛶ button in the top bar, **F11** to toggle and **Esc** to leave. In
+  *Settings ▸ Window* you can also turn on **Start in full screen every launch** (off by default).
+- **A modern look.** The window now carries the logo and name across the top, flat themed controls,
+  roomier lists, pill tabs and slim scrollbars — and the pop-out windows (node and aircraft cards,
+  Settings, Feedback, the chat archive) now **slide in from the right edge** of the window instead of
+  opening as separate windows that appear wherever.
+- **Tidied Map controls.** The layer toggles (Internet, Aircraft, Airspace, Names), the view filter,
+  Fit all and Clear history now live in a clean bar **above the map** instead of floating on top of it;
+  the zoom slider and node stepper stay as light overlays on the map itself.
+- **Clearer flight routes.** The aircraft card now shows a **ROUTE** section with **Departs** and
+  **Arrives** airports (code + city), plus any mid-route stop. A scheduled route is shown even when the
+  aircraft looks slightly off it (flagged rather than hidden); private / GA flights say so plainly.
+- **The Active list drops stale nodes.** A node you haven't heard from within the Active window (and
+  nodes with no timestamp at all) now leave the Active tab for History and the map, so Active only
+  shows what's genuinely current. Right-click any node to **Keep on clear (location test)** — kept
+  nodes are marked ★ and survive a history clear.
+- **Clear history, your way.** *Clear history…* on the Map tab now keeps your own node and any you've
+  marked for the location test, and offers to also reset the radio's own node database
+  (reset-nodedb) so cleared nodes don't repopulate on the next sync.
+- **Channel traffic: reply and delete.** Right-click a message to **Reply** straight to whoever sent
+  it (it resolves the sender and points the message bar at them) or **Delete** it for good — a deleted
+  message never shows again, in the panels or the archive.
+- **Jump to an aircraft.** The aircraft card has a **Show on map** button that recenters the map on
+  that plane.
+- **Internet nodes follow the map.** Purple internet-map nodes now load around wherever you pan the
+  map, not just near home, so you can explore other areas' nodes. Radius in Settings.
+
 ## 0.5.0-alpha — 2026-11-08
 
 Central Finite Curve becomes an airspace-awareness tool: drones, aircraft and no-fly zones together.

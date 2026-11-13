@@ -21,6 +21,8 @@ import urllib.error
 import urllib.request
 import webbrowser
 import os
+import shutil
+import tempfile
 import queue
 import threading
 import time
@@ -72,12 +74,16 @@ def asset_path(name):
     """Path to a bundled asset (icons), working from source and from a PyInstaller build."""
     base = getattr(sys, "_MEIPASS", HERE)
     return os.path.join(base, "assets", name)
-VERSION = "0.5.0-alpha"
+VERSION = "0.6.0-beta"
 HEALTH_SECS = 600   # how often a health line (memory, CPU, nodes) goes into the log
 DEMO = False        # --demo: made-up nodes instead of a radio, with its own files (see enable_demo)
 log = logging.getLogger("centralfinitecurve")
 DEFAULTS = {"mode": "serial", "port": "COM16", "host": "", "on_top": False,
-            "sound": True, "geometry": "440x680"}
+            "sound": True, "geometry": "440x680",
+            # window: full-screen is OFF by default; "fullscreen_on_start" makes it
+            # permanent (the app goes full screen every launch until you untick it).
+            "fullscreen": False, "fullscreen_on_start": False,
+            "ble_address": ""}  # last Bluetooth radio chosen (mode == "ble")
 RETRY_SECS = 10
 ACTIVE_MINS = 180  # a quiet node only announces itself every ~3 h, so a shorter window hides working nodes
 PUSH_GAP = 30  # seconds between phone pushes; alerts in between are merged into the next one
@@ -292,6 +298,14 @@ MAP_STYLES = {  # name -> (base tiles, label overlay or None, max zoom); all fre
 # Central Finite Curve — Rick & Morty "portal" palette, sampled from the app icon.
 BG, PANEL, FG, DIM, ACCENT, GOOD, BAD, WARN = (
     "#0b1412", "#13201b", "#e9f2ea", "#7e968a", "#8fe04a", "#3fe0a0", "#ef5a52", "#e8c24a")
+# Extra tokens for the modern look: raised cards, hairline borders, button hover,
+# and a darker rail for the side panel. Derived from the portal palette above so the
+# whole UI reads as one system rather than default-Windows grey.
+CARD = "#182a23"     # a step up from PANEL for cards/dialogs that float above the app
+BORDER = "#24392f"   # hairline separators and card outlines (barely-there, not grey)
+HOVER = "#20362b"    # button / row hover
+ACCENT_DK = "#1c3a16"  # muted accent fill behind selected tabs
+SCRIM = "#000000"    # dimming behind a modal side panel (used with low alpha)
 
 
 def load_cfg():
@@ -740,6 +754,25 @@ PRECACHE_RINGS = 1        # extra rings of tiles fetched around the view (librar
 DISK_CACHE_MB = 150       # downloaded tiles kept on disk so they aren't fetched twice
 DISK_CACHE_DAYS = 30      # then re-fetched, so map changes still come through
 REPO_URL = "https://github.com/DaGromflomite/Central-Finite-Curve"
+UPDATE_API = "https://api.github.com/repos/DaGromflomite/Central-Finite-Curve/releases"
+UPDATE_CHECK_SECS = 24 * 3600  # check GitHub for a newer release at most once a day
+
+
+def version_newer(remote, local):
+    """True if release tag `remote` is a newer version than `local` (handles v-prefix and -alpha
+    style prereleases: a final build outranks its prerelease; otherwise the suffix sorts lexically)."""
+    def parse(s):
+        s = str(s).lstrip("vV").strip()
+        core, _, suf = s.partition("-")
+        nums = tuple(int(x) if x.isdigit() else 0 for x in core.split("."))
+        return nums, suf
+    rn, rs = parse(remote)
+    ln, ls = parse(local)
+    if rn != ln:
+        return rn > ln
+    if (rs == "") != (ls == ""):
+        return rs == ""   # 1.0.0 is newer than 1.0.0-alpha
+    return rs > ls
 FEEDBACK_KINDS = (("Bug", "Something's broken"), ("Idea", "Idea or request"), ("Works", "It worked!"))
 FEEDBACK_URL_MAX = 7500  # GitHub refuses very long pre-filled issue links
 USER_AGENT = "CentralFiniteCurve/0.1 (+https://github.com/)"  # tile servers ask apps to identify themselves
@@ -974,6 +1007,12 @@ if tkintermapview:
             super().draw_move(called_after_zoom)
             self.fill_previews()
             self.work.set()
+            cb = getattr(self, "on_move", None)
+            if cb:
+                try:
+                    cb()
+                except Exception:
+                    pass
 
         def preview_for(self, zoom, x, y):
             # look up to 3 levels out for a loaded tile covering this one, crop and enlarge it
@@ -1361,11 +1400,204 @@ class DemoInterface:
             last = now
 
 
+class SidePanel(tk.Frame):
+    """A drawer that slides in from the right edge of the main window instead of
+    opening a separate OS window. It is a tk.Frame (so `tk.Label(panel, ...)` works
+    exactly like a Toplevel parent) with the handful of Toplevel methods the dialogs
+    call bolted on, so a dialog switches from a pop-out window to an in-window drawer
+    by changing only `tk.Toplevel(self.root, ...)` to `self.side_panel(...)`.
+
+    The frame returned IS the content body; a thin header with the title and a × sits
+    above it, and the whole thing animates on and off screen."""
+
+    def __init__(self, app, width=400, bg=CARD, scroll=False):
+        self._app = app
+        root = app.root
+        self._outer = tk.Frame(root, bg=bg, highlightthickness=1,
+                               highlightbackground=BORDER, highlightcolor=BORDER)
+        self._width = width
+        head = tk.Frame(self._outer, bg=bg)
+        head.pack(fill="x", side="top")
+        self._title_lbl = tk.Label(head, text="", bg=bg, fg=FG, font=("Segoe UI Semibold", 11),
+                                   anchor="w")
+        self._title_lbl.pack(side="left", padx=(14, 8), pady=10)
+        self._close_btn = tk.Label(head, text="✕", bg=bg, fg=DIM, font=("Segoe UI", 12),
+                                   cursor="hand2", padx=10)
+        self._close_btn.pack(side="right", pady=6, padx=(0, 6))
+        self._close_btn.bind("<Button-1>", lambda e: self.close_via_protocol())
+        self._close_btn.bind("<Enter>", lambda e: self._close_btn.config(fg=FG))
+        self._close_btn.bind("<Leave>", lambda e: self._close_btn.config(fg=DIM))
+        tk.Frame(self._outer, bg=BORDER, height=1).pack(fill="x", side="top")
+        self._canvas = None
+        if scroll:
+            # tall, grid-laid dialogs (Settings, Feedback) scroll vertically inside the drawer
+            wrap = tk.Frame(self._outer, bg=bg)
+            wrap.pack(fill="both", expand=True)
+            self._canvas = tk.Canvas(wrap, bg=bg, highlightthickness=0, bd=0)
+            sb = ttk.Scrollbar(wrap, orient="vertical", command=self._canvas.yview)
+            self._canvas.configure(yscrollcommand=sb.set)
+            sb.pack(side="right", fill="y")
+            self._canvas.pack(side="left", fill="both", expand=True)
+            super().__init__(self._canvas, bg=bg)
+            self._winid = self._canvas.create_window((0, 0), window=self, anchor="nw")
+            self.bind("<Configure>", lambda e: self._canvas.configure(scrollregion=self._canvas.bbox("all")))
+            self._canvas.bind("<Configure>", lambda e: self._canvas.itemconfigure(self._winid, width=e.width))
+            # scope the wheel to while the pointer is over the drawer, so it never leaks globally
+            self._canvas.bind("<Enter>", lambda e: self._canvas.bind_all("<MouseWheel>", self._on_wheel))
+            self._canvas.bind("<Leave>", lambda e: self._canvas.unbind_all("<MouseWheel>"))
+        else:
+            super().__init__(self._outer, bg=bg)
+            self.pack(fill="both", expand=True)
+        self._on_close = None
+        self._anim = None
+        self._slide_in()
+
+    def _on_wheel(self, e):
+        if self._canvas and self._canvas.winfo_exists() and self.winfo_exists():
+            try:
+                self._canvas.yview_scroll(int(-e.delta / 120), "units")
+            except tk.TclError:
+                pass
+
+    def reset_body(self, width=None):
+        """Clear the current dialog's widgets + handlers so the open drawer can host a new dialog
+        in place (no re-slide). Used when one card/dialog is opened while another is already open."""
+        self._app.card_chat = None  # the old card's in-card chat (if any) went with its widgets
+        try:
+            self.unbind("<Escape>")
+        except tk.TclError:
+            pass
+        for child in list(self.winfo_children()):
+            try:
+                child.destroy()
+            except tk.TclError:
+                pass
+        self._on_close = None
+        self._title_lbl.config(text="")
+        if width:
+            self._width = max(300, int(width))
+        if self._outer.winfo_exists():
+            self._place(0)
+            self._outer.lift()
+        if self._canvas is not None:
+            try:
+                self._canvas.yview_moveto(0)
+            except tk.TclError:
+                pass
+
+    # ---- slide animation ----
+    def _place(self, off):
+        # off = pixels the drawer is pushed off the right edge (width -> 0 as it opens)
+        self._outer.place(relx=1.0, rely=0, x=int(off), y=0, anchor="ne",
+                          relheight=1.0, width=self._width)
+
+    def _slide_in(self):
+        self._place(self._width)
+        self._outer.lift()
+        steps = [self._width * (1 - i / 6) for i in range(1, 7)]
+
+        def step():
+            if not self._outer.winfo_exists():
+                return
+            if steps:
+                self._place(steps.pop(0))
+                self._anim = self._app.root.after(12, step)
+            else:
+                self._place(0)
+        step()
+
+    def _slide_out_then(self, done):
+        steps = [self._width * i / 5 for i in range(1, 6)]
+
+        def step():
+            if not self._outer.winfo_exists():
+                return
+            if steps:
+                self._place(steps.pop(0))
+                self._app.root.after(10, step)
+            else:
+                done()
+        step()
+
+    # ---- Toplevel look-alike API (only what the dialogs use) ----
+    def title(self, text=None):
+        if text is None:
+            return self._title_lbl.cget("text")
+        # dialogs pass "Thing - Central Finite Curve"; show just the leading name
+        self._title_lbl.config(text=str(text).split(" - ")[0].split(" settings")[0])
+
+    def geometry(self, spec=None):
+        m = re.match(r"(\d+)x(\d+)", str(spec or ""))
+        if m:
+            self._width = max(300, int(m.group(1)))
+            if self._outer.winfo_exists():
+                self._place(0)
+
+    def transient(self, *a):
+        pass
+
+    def grab_set(self):
+        pass  # the drawer is intentionally non-modal — you can still use the app behind it
+
+    def attributes(self, *a, **k):
+        pass
+
+    def protocol(self, name, fn):
+        if name == "WM_DELETE_WINDOW":
+            self._on_close = fn
+
+    def deiconify(self):
+        if self._outer.winfo_exists():
+            self._outer.lift()
+
+    def lift(self, *a):
+        if self._outer.winfo_exists():
+            self._outer.lift()
+
+    def destroy(self):
+        if getattr(self, "_destroying", False):
+            return
+        self._destroying = True
+        # the slide-out is async, so clear the in-card chat now rather than waiting for <Destroy>
+        # (otherwise a caller that checks right after destroy() still sees it hooked up)
+        self._app.card_chat = None
+        if self._canvas is not None:
+            try:
+                self._canvas.unbind_all("<MouseWheel>")
+            except tk.TclError:
+                pass
+        if self._app._side is self:
+            self._app._side = None
+        outer = self._outer
+
+        def finish():
+            try:
+                outer.destroy()
+            except tk.TclError:
+                pass
+        if outer.winfo_exists():
+            self._slide_out_then(finish)
+        else:
+            finish()
+
+    def close_via_protocol(self):
+        """Run the dialog's WM_DELETE_WINDOW handler (which usually saves) then close."""
+        if self._on_close:
+            try:
+                self._on_close()
+                return
+            except tk.TclError:
+                pass
+        self.destroy()
+
+
 class App:
     def __init__(self, root):
         self.root = root
         self.cfg = load_cfg()
         self.names_on = bool(self.cfg.get("map_labels", True))  # map node/aircraft name text on/off
+        self._side = None   # the single open side-panel drawer, if any
+        self.update_info = None  # set when a newer GitHub release is found
         self.q = queue.Queue()
         self.iface = None
         self.connecting = False
@@ -1453,6 +1685,16 @@ class App:
         self.start_tray()
         if self.tray and self.cfg.get("hidden"):
             root.withdraw()
+        # full screen: OFF by default; "fullscreen_on_start" makes it apply on every launch.
+        self.fullscreen = False
+        self.root.bind("<F11>", self.toggle_fullscreen)
+        self.root.bind("<Escape>", self.exit_fullscreen)  # Esc leaves full screen
+        if self.cfg.get("fullscreen_on_start"):
+            self.root.after(120, lambda: self._apply_fullscreen(True))
+        # auto-update: check GitHub shortly after startup, at most once a day (toggle in Settings)
+        if self.cfg.get("auto_update", True) and not DEMO and \
+                time.time() - float(self.cfg.get("update_check_last", 0) or 0) > UPDATE_CHECK_SECS:
+            self.root.after(8000, self.check_update)
         self.root.after(200, self.pump)
         self.root.after(500, self.tick)
         # Start the background transient-node discovery loop (first run shortly
@@ -1469,6 +1711,7 @@ class App:
             pystray.MenuItem("Pause / resume", act("pause")),
             pystray.MenuItem("Settings", act("settings")),
             pystray.MenuItem("Clear messages", act("clear")),
+            pystray.MenuItem("Check for updates", act("update")),
             pystray.MenuItem("Send feedback", act("feedback")),
             pystray.Menu.SEPARATOR,
             pystray.MenuItem("Quit Central Finite Curve", act("quit")))
@@ -1497,6 +1740,9 @@ class App:
         elif action == "feedback":
             self.show()
             self.open_feedback()
+        elif action == "update":
+            self.show()
+            self.apply_update() if getattr(self, "update_info", None) else self.check_update(manual=True)
         elif action == "quit":
             self.quit()
 
@@ -1546,7 +1792,7 @@ class App:
         self.dmap.set_awake(False)
         dbar = tk.Frame(f4, bg=BG)
         dbar.place(relx=0.5, rely=1.0, y=-6, anchor="s")
-        dbtn = dict(bg=PANEL, fg=FG, relief="flat", activebackground="#2c3a4a", font=("Segoe UI", 9))
+        dbtn = dict(bg=PANEL, fg=FG, relief="flat", activebackground=HOVER, font=("Segoe UI", 9))
         tk.Button(dbar, text="Fit path", command=self.fit_track, **dbtn).pack(side="left", padx=(0, 6))
         self.track_lbl = tk.Label(dbar, text="no drone pings yet", bg=BG, fg=DIM, width=42,
                                   font=("Segoe UI", 9))
@@ -1561,17 +1807,41 @@ class App:
     def build_ui(self):
         style = ttk.Style()
         style.theme_use("clam")
+        # Modern, flat, non-Windows look: roomier rows, hairline borders, pill tabs, slim scrollbars.
         style.configure("Treeview", background=PANEL, fieldbackground=PANEL,
-                        foreground=FG, borderwidth=0, rowheight=22)
-        style.configure("Treeview.Heading", background=BG, foreground=DIM, borderwidth=0)
-        style.map("Treeview", background=[("selected", "#2c3a4a")])
+                        foreground=FG, borderwidth=0, rowheight=26, font=("Segoe UI", 9))
+        style.configure("Treeview.Heading", background=BG, foreground=DIM, borderwidth=0,
+                        relief="flat", font=("Segoe UI", 8, "bold"), padding=(6, 6))
+        style.map("Treeview.Heading", background=[("active", BG)])
+        style.map("Treeview", background=[("selected", ACCENT_DK)], foreground=[("selected", FG)])
         style.configure("TCombobox", fieldbackground=PANEL, background=PANEL, foreground=FG,
-                        arrowcolor=FG)
+                        arrowcolor=ACCENT, borderwidth=0, relief="flat", padding=4)
         style.map("TCombobox", fieldbackground=[("readonly", PANEL)], foreground=[("readonly", FG)],
-                  selectbackground=[("readonly", PANEL)], selectforeground=[("readonly", FG)])
+                  selectbackground=[("readonly", PANEL)], selectforeground=[("readonly", FG)],
+                  bordercolor=[("focus", ACCENT)])
+        # slim, dark scrollbars (no chunky Windows arrows)
+        for sb in ("Vertical.TScrollbar", "Horizontal.TScrollbar"):
+            style.configure(sb, background=BORDER, troughcolor=BG, borderwidth=0, arrowsize=12,
+                            relief="flat", arrowcolor=DIM)
+            style.map(sb, background=[("active", DIM)])
+        style.configure("TPanedwindow", background=BG)
+        style.configure("Horizontal.TProgressbar", background=ACCENT, troughcolor=PANEL, borderwidth=0)
+
+        # brand header: the logo + product name across the very top of the window
+        brand = tk.Frame(self.root, bg=BG)
+        brand.pack(fill="x", padx=12, pady=(10, 2))
+        self.logo_img = None
+        try:
+            self.logo_img = tk.PhotoImage(file=asset_path("icon_32.png"))
+            tk.Label(brand, image=self.logo_img, bg=BG).pack(side="left")
+        except tk.TclError:
+            log.debug("Logo image didn't load", exc_info=True)
+        tk.Label(brand, text="Central Finite Curve", bg=BG, fg=FG,
+                 font=("Segoe UI Semibold", 13)).pack(side="left", padx=(8, 0))
+        tk.Frame(self.root, bg=BORDER, height=1).pack(fill="x", padx=12, pady=(2, 0))
 
         top = tk.Frame(self.root, bg=BG)
-        top.pack(fill="x", padx=8, pady=(8, 4))
+        top.pack(fill="x", padx=8, pady=(6, 4))
         # red DRONE DETECTED banner: packed right under this bar only while alerts are coming in
         self.top_bar = top
         self.banner = tk.Frame(self.root, bg=BAD)
@@ -1587,28 +1857,30 @@ class App:
         self.dot.pack(side="left")
         self.status = tk.Label(top, text="Starting…", fg=FG, bg=BG, font=("Segoe UI", 10, "bold"))
         self.status.pack(side="left", padx=4)
+        tb = dict(bg=PANEL, fg=FG, relief="flat", activebackground=HOVER, activeforeground=FG,
+                  font=("Segoe UI", 9), bd=0, pady=4)
+        self.fs_btn = tk.Button(top, text="⛶", command=self.toggle_fullscreen, padx=8, **tb)
+        self.fs_btn.pack(side="right", padx=2)
         for text, cmd in (("⚙", self.open_settings), ("📌", self.toggle_top)):
-            tk.Button(top, text=text, command=cmd, bg=PANEL, fg=FG, relief="flat",
-                      activebackground="#2c3a4a", width=3).pack(side="right", padx=2)
-        self.pause_btn = tk.Button(top, text="Pause", command=self.toggle_pause, bg=PANEL,
-                                   fg=FG, relief="flat", activebackground="#2c3a4a", width=7)
+            tk.Button(top, text=text, command=cmd, padx=8, **tb).pack(side="right", padx=2)
+        self.pause_btn = tk.Button(top, text="Pause", command=self.toggle_pause, padx=12, **tb)
         self.pause_btn.pack(side="right", padx=2)
         # redraw the lists now and actively ping quiet nodes (e.g. the drone detector) so they check in
-        self.search_btn = tk.Button(top, text="Search", command=self.search_now, bg=PANEL,
-                                    fg=FG, relief="flat", activebackground="#2c3a4a", width=7)
+        self.search_btn = tk.Button(top, text="Search", command=self.search_now, padx=12, **tb)
         self.search_btn.pack(side="right", padx=2)
         # force a clean reconnect: for a hung/stale link, or an immediate retry after replugging
-        self.reconnect_btn = tk.Button(top, text="Reconnect", command=self.reconnect, bg=PANEL,
-                                       fg=FG, relief="flat", activebackground="#2c3a4a", width=9)
+        self.reconnect_btn = tk.Button(top, text="Reconnect", command=self.reconnect, padx=12, **tb)
         self.reconnect_btn.pack(side="right", padx=2)
 
         self.info = tk.Label(self.root, text="", fg=DIM, bg=BG, anchor="w", justify="left",
                              font=("Segoe UI", 9))
         self.info.pack(fill="x", padx=10)
 
-        style.configure("TNotebook", background=BG, borderwidth=0)
-        style.configure("TNotebook.Tab", background=BG, foreground=DIM, padding=(12, 4), borderwidth=0)
-        style.map("TNotebook.Tab", background=[("selected", PANEL)], foreground=[("selected", FG)])
+        style.configure("TNotebook", background=BG, borderwidth=0, tabmargins=(2, 4, 2, 0))
+        style.configure("TNotebook.Tab", background=BG, foreground=DIM, padding=(16, 7), borderwidth=0,
+                        font=("Segoe UI", 9))
+        style.map("TNotebook.Tab", background=[("selected", PANEL)], foreground=[("selected", ACCENT)],
+                  expand=[("selected", (0, 0, 0, 0))])
         self.tabs = ttk.Notebook(self.root)
         self.tabs.pack(fill="both", expand=False, padx=8, pady=(8, 0))
 
@@ -1622,7 +1894,9 @@ class App:
             tree.tag_configure("me", foreground=ACCENT)
             tree.tag_configure("fresh", foreground=GOOD)
             tree.tag_configure("gone", foreground=DIM)
+            tree.tag_configure("kept", foreground=WARN)
             tree.bind("<<TreeviewSelect>>", self.pick_dest)
+            tree.bind("<Button-3>", self.node_menu)  # keep-on-clear toggle + open card
             return frame, tree
 
         f1, self.tree = make_tree(("name", "snr", "rssi", "hops", "batt", "heard"),
@@ -1639,75 +1913,86 @@ class App:
         self.map_fitted = False
         if tkintermapview:
             f3 = tk.Frame(self.tabs, bg=PANEL)
+            self.map_points = {}   # node id -> (lat, lon, label, colour, is_repeater, last heard)
+            self.map_idx = -1
+            self.map_filter = self.cfg.get("map_filter", "All")
+            self.online = {}
+            self.online_last = 0
+            self.online_busy = False
+            self._online_center = None
+            self._move_job = None
+            self.acc_polys = {}
+            self.last_me = (None, {})
+            self.info_win = None
+
+            # ---- controls toolbar ABOVE the map (layer toggles, view filter, actions) ----
+            self.online_var = tk.BooleanVar(value=self.cfg.get("online_nodes", True))
+            self.ac_var = tk.BooleanVar(value=bool(self.cfg.get("aircraft_on", False)))
+            self.as_var = tk.BooleanVar(value=bool(self.cfg.get("airspace_on", False)))
+            self.names_var = tk.BooleanVar(value=self.names_on)
+            toolbar = tk.Frame(f3, bg=BG)
+            toolbar.pack(side="top", fill="x")
+            row1 = tk.Frame(toolbar, bg=BG)
+            row1.pack(fill="x", padx=10, pady=(8, 2))
+            tbtn = dict(bg=PANEL, fg=FG, relief="flat", activebackground=HOVER, activeforeground=FG,
+                        font=("Segoe UI", 9), bd=0, padx=10, pady=3)
+            tk.Button(row1, text="Fit all", command=self.fit_map, **tbtn).pack(side="left")
+            # which radio-heard nodes get a pin: only the active ones, or everyone heard within a time frame
+            self.seen_box = ttk.Combobox(row1, state="readonly", width=24, font=("Segoe UI", 9),
+                                         values=[label for _, label in MAP_SEEN])
+            self.seen_box.set(self.seen_label())
+            self.seen_box.bind("<<ComboboxSelected>>", lambda e: self.set_map_seen(
+                next(k for k, label in MAP_SEEN if label == self.seen_box.get())))
+            self.seen_box.pack(side="left", padx=8)
+            tk.Button(row1, text="Clear history…", command=self.clear_map_history,
+                      **dict(tbtn, fg=DIM)).pack(side="right")
+
+            def layer(parent, text, var, cmd, colour):
+                return tk.Checkbutton(parent, text=text, variable=var, command=cmd, bg=BG, fg=colour,
+                                      selectcolor=PANEL, activebackground=BG, activeforeground=colour,
+                                      font=("Segoe UI", 9), relief="flat", bd=0, padx=4, pady=1)
+            row2 = tk.Frame(toolbar, bg=BG)
+            row2.pack(fill="x", padx=8, pady=(0, 7))
+            self.online_btn = layer(row2, "Internet", self.online_var, self.toggle_online, ONLINE)
+            self.online_btn.pack(side="left", padx=2)
+            layer(row2, "Aircraft", self.ac_var, self.toggle_aircraft, AIRCRAFT).pack(side="left", padx=2)
+            layer(row2, "Airspace", self.as_var, self.toggle_airspace, "#4fb3ff").pack(side="left", padx=2)
+            layer(row2, "Names", self.names_var, self.toggle_names, FG).pack(side="left", padx=2)
+            self.filter_btn = tk.Button(row2, text=self.map_filter, width=9, command=self.cycle_filter, **tbtn)
+            self.filter_btn.pack(side="right", padx=2)
+            tk.Label(row2, text="show:", bg=BG, fg=DIM, font=("Segoe UI", 8)).pack(side="right", padx=(6, 2))
+            tk.Frame(toolbar, bg=BORDER, height=1).pack(fill="x")  # hairline under the toolbar
+
+            # ---- the map fills the rest ----
             self.map = SmoothMapView(f3, width=400, height=300, corner_radius=0,
                                      on_zoom=self.sync_zoom_slider)
             self.apply_map_style()
             self.map.set_position(*(self.home() or WORLD_VIEW))
             self.map.set_zoom(10 if self.home() else 2)
             self.map.pack(fill="both", expand=True)
-            # zoom slider under the +/- buttons: top = closer in
+            self.map.on_move = self._on_map_move  # internet nodes follow where you pan (debounced)
+
+            # zoom slider overlaid on the left of the map (top = closer in)
             self.zoom_var = tk.IntVar(value=10)
             self.zoom_slider = tk.Scale(f3, from_=19, to=3, orient="vertical", variable=self.zoom_var,
                                         showvalue=False, length=150, width=12, sliderlength=18,
                                         bg=PANEL, troughcolor=BG, highlightthickness=0, bd=0,
                                         activebackground=ACCENT, command=self.on_zoom_slider)
-            self.zoom_slider.place(x=26, y=100)
+            self.zoom_slider.place(in_=self.map, x=20, y=20)
             self.slider_job = None
 
-            # bottom bar: step through nodes on the map, optionally only repeaters
-            self.map_points = {}   # node id -> (lat, lon, label, colour, is_repeater, last heard)
-            self.map_idx = -1
-            self.map_filter = self.cfg.get("map_filter", "All")
+            # node stepper overlaid at the bottom of the map
+            btn = dict(bg=PANEL, fg=FG, relief="flat", activebackground=HOVER, font=("Segoe UI", 9))
             bar = tk.Frame(f3, bg=BG)
-            bar.place(relx=0.5, rely=1.0, y=-6, anchor="s")
-            btn = dict(bg=PANEL, fg=FG, relief="flat", activebackground="#2c3a4a", font=("Segoe UI", 9))
-            self.filter_btn = tk.Button(bar, text=self.map_filter, width=9, command=self.cycle_filter, **btn)
-            self.filter_btn.pack(side="left", padx=(0, 6))
+            bar.place(in_=self.map, relx=0.5, rely=1.0, y=-6, anchor="s")
             tk.Button(bar, text="◀", width=3, command=lambda: self.cycle_map(-1), **btn).pack(side="left")
-            self.cycle_lbl = tk.Label(bar, text="no nodes on map", bg=BG, fg=DIM, width=48,
+            self.cycle_lbl = tk.Label(bar, text="no nodes on map", bg=BG, fg=DIM, width=46,
                                       font=("Segoe UI", 9))
             self.cycle_lbl.pack(side="left", padx=4)
             self.cycle_nid = None  # node shown in the bar; clicking the bar opens its info card
             self.cycle_lbl.bind("<Button-1>", lambda e: self.cycle_nid and self.show_node_info(self.cycle_nid))
-            self.info_win = None
             tk.Button(bar, text="▶", width=3, command=lambda: self.cycle_map(1), **btn).pack(side="left")
-            tk.Button(f3, text="Fit all", command=self.fit_map, bg=PANEL, fg=FG, relief="flat",
-                      font=("Segoe UI", 8)).place(relx=1.0, x=-6, y=6, anchor="ne")
-            # internet-reported nodes from meshmap.net (purple), shown separately from radio-heard ones
-            self.online = {}
-            self.online_last = 0
-            self.online_busy = False
-            self.acc_polys = {}
-            self.last_me = (None, {})
-            # which radio-heard nodes get a pin: only the active ones, or everyone heard within a time frame
-            self.seen_box = ttk.Combobox(f3, state="readonly", width=30, font=("Segoe UI", 9),
-                                         values=[label for _, label in MAP_SEEN])
-            self.seen_box.set(self.seen_label())
-            self.seen_box.bind("<<ComboboxSelected>>", lambda e: self.set_map_seen(
-                next(k for k, label in MAP_SEEN if label == self.seen_box.get())))
-            self.seen_box.place(relx=1.0, x=-6, y=34, anchor="ne")
-            # internet-reported nodes (meshmap.net, purple pins) are a separate layer you can switch off
-            self.online_var = tk.BooleanVar(value=self.cfg.get("online_nodes", True))
-            self.online_btn = tk.Checkbutton(f3, text="Show internet-map nodes (purple)", variable=self.online_var,
-                                             command=self.toggle_online, bg=PANEL, fg=ONLINE, selectcolor=BG,
-                                             activebackground=PANEL, activeforeground=ONLINE,
-                                             font=("Segoe UI", 8), relief="flat", bd=0, padx=4)
-            self.online_btn.place(relx=1.0, x=-6, y=62, anchor="ne")
-            self.ac_var = tk.BooleanVar(value=bool(self.cfg.get("aircraft_on", False)))
-            tk.Checkbutton(f3, text="Show aircraft (adsb.fi)", variable=self.ac_var, command=self.toggle_aircraft,
-                           bg=PANEL, fg=AIRCRAFT, selectcolor=BG, activebackground=PANEL, activeforeground=AIRCRAFT,
-                           font=("Segoe UI", 8), relief="flat", bd=0, padx=4).place(relx=1.0, x=-6, y=86, anchor="ne")
-            self.as_var = tk.BooleanVar(value=bool(self.cfg.get("airspace_on", False)))
-            tk.Checkbutton(f3, text="Show airspace & no-fly zones (FAA, US)", variable=self.as_var,
-                           command=self.toggle_airspace, bg=PANEL, fg="#4fb3ff", selectcolor=BG,
-                           activebackground=PANEL, activeforeground="#4fb3ff", font=("Segoe UI", 8), relief="flat",
-                           bd=0, padx=4).place(relx=1.0, x=-6, y=110, anchor="ne")
-            tk.Button(f3, text="Clear map history", command=self.clear_map_history, bg=PANEL, fg=DIM,
-                      relief="flat", font=("Segoe UI", 8)).place(relx=1.0, x=-6, y=136, anchor="ne")
-            self.names_var = tk.BooleanVar(value=self.names_on)
-            tk.Checkbutton(f3, text="Show names", variable=self.names_var, command=self.toggle_names,
-                           bg=PANEL, fg=FG, selectcolor=BG, activebackground=PANEL, activeforeground=FG,
-                           font=("Segoe UI", 8), relief="flat", bd=0, padx=4).place(relx=1.0, x=-6, y=160, anchor="ne")
+
             if self.cfg.get("airspace_on"):
                 self.root.after(1500, self.draw_airspace)
             # adsb.fi asks to be credited with a link whenever its data is shown
@@ -1715,7 +2000,7 @@ class App:
                                       font=("Segoe UI", 8, "underline"))
             self.ac_credit.bind("<Button-1>", lambda e: webbrowser.open("https://adsb.fi"))
             if self.cfg.get("aircraft_on"):
-                self.ac_credit.place(relx=0.0, rely=1.0, x=6, y=-44, anchor="sw")
+                self.ac_credit.place(in_=self.map, relx=0.0, rely=1.0, x=6, y=-44, anchor="sw")
             self.tabs.add(f3, text="Map")
             self.map_tab = f3
             self.tabs.bind("<<NotebookTabChanged>>", self.sync_map_awake)
@@ -1821,18 +2106,43 @@ class App:
         except (TypeError, ValueError):
             return False
 
+    def is_deleted(self, m):
+        return self.msg_key(m) in (self.cfg.get("deleted_ids") or ())
+
+    def delete_msg(self, m):
+        """Permanently remove a message from every panel and the archive. Unlike Archive (which only
+        hides it from the panels), a deleted message never shows again, anywhere."""
+        ids = list(self.cfg.get("deleted_ids") or [])
+        ids.append(self.msg_key(m))
+        self.cfg["deleted_ids"] = ids[-10000:]
+        save_cfg(self.cfg)
+        self.rebuild_panels()
+
+    def reply_to(self, peer, name):
+        """Start a direct reply to the sender of a message: point the message bar at them + focus it."""
+        self.set_dest(peer)
+        try:
+            self.entry.focus_force()
+        except tk.TclError:
+            pass
+
     def msg_menu(self, txt, event):
         mtag = next((t for t in txt.tag_names(f"@{event.x},{event.y}") if t.startswith("m") and t[1:].isdigit()), None)
         m = self.line_msgs.get(mtag)
         if m is None:
             return
         peer, name = self.msg_peer(m)
+        is_node = bool(name) and name != "Everyone" and not peer.startswith("name:")
         menu = tk.Menu(txt, tearoff=0, bg=PANEL, fg=FG, activebackground=ACCENT, activeforeground="#000")
+        # Reply straight to whoever sent it (resolves the sender id -> node), for channel + direct messages
+        if is_node and not m.get("mine"):
+            menu.add_command(label=f"Reply to {name}"[:50], command=lambda: self.reply_to(peer, name))
+        menu.add_command(label="Delete this message", command=lambda: self.delete_msg(m))
         menu.add_command(label="Archive this message", command=lambda: self.archive_msgs(msg=m))
         if name and name != "Everyone":
             menu.add_command(label=f"Archive whole conversation with {name}"[:60],
                              command=lambda: self.archive_msgs(peer=peer))
-            if not peer.startswith("name:") and hasattr(self, "info_win"):
+            if is_node and hasattr(self, "info_win"):
                 menu.add_separator()
                 menu.add_command(label=f"Open {name}'s card"[:60], command=lambda: self.show_node_info(peer))
         try:
@@ -1860,7 +2170,7 @@ class App:
             keep = collections.deque(maxlen=MSG_PANEL_LINES)
             for segments, mtag in panel["lines"]:
                 m = self.line_msgs.get(mtag)
-                if m is None or not self.is_archived(m):
+                if m is None or (not self.is_archived(m) and not self.is_deleted(m)):
                     keep.append((segments, mtag))
             panel["lines"] = keep
             for txt in panel["texts"]:
@@ -1911,6 +2221,23 @@ class App:
                 pass  # its window was closed
         panel["texts"] = alive
 
+    def side_panel(self, width=400, bg=CARD, scroll=False):
+        """Open a right-edge drawer and return it. It mimics tk.Toplevel, so callers use it as the
+        parent window for their widgets. If a drawer of the same kind is already open it is reused
+        (its old content is cleared and the new content fills it) — so clicking node after node just
+        swaps the card, with no destroy/recreate churn or re-slide flicker."""
+        rw = self.root.winfo_width()
+        w = min(max(300, width), int(rw * 0.95)) if rw > 320 else width
+        cur = self._side
+        if cur is not None and cur.winfo_exists() and not getattr(cur, "_destroying", False) \
+                and bool(cur._canvas) == bool(scroll):
+            cur.reset_body(width=w)
+            return cur
+        if cur is not None and cur.winfo_exists():
+            cur.destroy()
+        self._side = SidePanel(self, width=w, bg=bg, scroll=scroll)
+        return self._side
+
     def pop_panel(self, key):
         """Show one message panel in its own resizable window (it keeps updating live)."""
         panel = self.panels[key]
@@ -1942,7 +2269,7 @@ class App:
         """The send bar (and extras) for a popped-out message window, matching what that panel is for."""
         bar = tk.Frame(win, bg=BG)
         bar.pack(side="bottom", fill="x", padx=8, pady=(0, 8), before=txt)
-        btn = dict(bg=PANEL, fg=FG, relief="flat", activebackground="#2c3a4a", font=("Segoe UI", 9))
+        btn = dict(bg=PANEL, fg=FG, relief="flat", activebackground=HOVER, font=("Segoe UI", 9))
         if key == "dm":
             box = ttk.Combobox(bar, state="readonly", width=26, values=list(self.dest["values"]))
             cur = self.dest.get()
@@ -1993,6 +2320,8 @@ class App:
                 del self.seen_ids[old]
         when = datetime.datetime.fromtimestamp(m["t"]).strftime("%m/%d %H:%M")
         kind = self.msg_kind(m)
+        if self.is_deleted(m):
+            return  # deleted by the user: never show it again, anywhere
         if self.is_archived(m):
             return  # archived from the panels by the user; still in the archive window
         line = [(f"{when}  ", "time"), (m["from"], "me" if m.get("mine") else "who")]
@@ -2073,24 +2402,101 @@ class App:
             self.cfg["geometry"] = geo
             save_cfg(self.cfg)
 
-    def clear_map_history(self):
-        if not messagebox.askyesno(
-                "Clear map history",
-                "Remove every recorded node from the map and the History tab?\n\n"
-                "Nodes still in your radio's own node list reappear straight away. "
-                "(A backup is kept in nodes-history-backup.json.)", parent=self.root):
+    def kept_ids(self):
+        """Node IDs to preserve when clearing: your own node plus any you've marked 'keep on clear'
+        (the location-test nodes). Right-click a node in Active/History to mark or unmark it."""
+        keep = set(self.cfg.get("keep_on_clear") or [])
+        me = getattr(self, "last_me", (None,))[0]
+        if me:
+            keep.add(me)
+        return keep
+
+    def set_keep(self, nid, keep):
+        """Mark/unmark a node as kept-on-clear (the location test)."""
+        ids = set(self.cfg.get("keep_on_clear") or [])
+        ids.add(nid) if keep else ids.discard(nid)
+        self.cfg["keep_on_clear"] = sorted(ids)
+        save_cfg(self.cfg)
+        if self.iface:
+            self.refresh()
+        else:
+            self.update_map()
+
+    def node_menu(self, event):
+        """Right-click menu on the Active/History lists: keep-on-clear toggle + open the card."""
+        tree = event.widget
+        iid = tree.identify_row(event.y)
+        if not iid:
             return
+        tree.selection_set(iid)
+        keep = set(self.cfg.get("keep_on_clear") or [])
+        name = self.history.get(iid, {}).get("name", iid)
+        menu = tk.Menu(tree, tearoff=0, bg=PANEL, fg=FG, activebackground=ACCENT, activeforeground="#000")
+        if iid in keep:
+            menu.add_command(label="Stop keeping on clear", command=lambda: self.set_keep(iid, False))
+        else:
+            menu.add_command(label="Keep on clear (location test)"[:50], command=lambda: self.set_keep(iid, True))
+        menu.add_separator()
+        menu.add_command(label=f"Open {name}'s card"[:50], command=lambda: self.show_node_info(iid))
+        try:
+            menu.tk_popup(event.x_root, event.y_root)
+        finally:
+            menu.grab_release()
+
+    def reset_nodedb(self):
+        """Wipe the radio's own node database so cleared nodes don't repopulate on the next sync."""
+        if not self.iface or DEMO:
+            return
+        iface = self.iface
+
+        def work():
+            try:
+                node = getattr(iface, "localNode", None)
+                fn = getattr(node, "resetNodeDb", None) or getattr(node, "reset_node_db", None) if node else None
+                if fn:
+                    fn()
+                    log.info("Radio node database reset (reset-nodedb)")
+                    self.q.put(("ui", lambda: self.note("Radio node database reset.", "me")))
+                else:
+                    log.warning("This meshtastic version exposes no reset-nodedb method")
+            except Exception:
+                log.warning("reset-nodedb failed", exc_info=True)
+        threading.Thread(target=work, daemon=True, name="reset-nodedb").start()
+
+    def clear_map_history(self):
+        """Clear the History tab + the map, keeping your own node and any location-test nodes you
+        marked 'keep on clear'. Optionally also resets the radio's node database."""
+        keep = self.kept_ids()
+        kept_names = [self.history.get(k, {}).get("name", k) for k in keep]
+        kept_note = ("\n\nKept (your node / location test): "
+                     + ", ".join(n for n in kept_names if n)[:140]) if keep else ""
+        if not messagebox.askyesno(
+                "Clear history",
+                "Clear the History tab and remove recorded nodes from the map?" + kept_note +
+                "\n\n(A backup is saved to nodes-history-backup.json.)", parent=self.root):
+            return
+        wipe_radio = bool(self.iface) and not DEMO and messagebox.askyesno(
+            "Also reset the radio?",
+            "Also wipe your radio's own node database (reset-nodedb)?\n\n"
+            "Without this, nodes your radio still remembers reappear on the next sync. "
+            "Either way, nodes in range are re-heard over time.", parent=self.root)
         try:
             if os.path.exists(HIST_PATH):
-                os.replace(HIST_PATH, os.path.join(os.path.dirname(HIST_PATH), "nodes-history-backup.json"))
+                shutil.copyfile(HIST_PATH, os.path.join(os.path.dirname(HIST_PATH), "nodes-history-backup.json"))
         except OSError:
             log.warning("Couldn't back up the node history", exc_info=True)
-        self.history.clear()
-        self.heard.clear()  # otherwise the next refresh rebuilds history from this session's sightings
+        self.history = {k: v for k, v in self.history.items() if k in keep}
+        self.heard = {k: v for k, v in self.heard.items() if k in keep}  # don't rebuild from this session
+        self.online = {}
         self.hist_dirty = True
         save_json(HIST_PATH, self.history)
-        log.info("Map history cleared by the user")
+        log.info("History cleared by the user (kept %d node(s)); radio reset=%s", len(keep), wipe_radio)
         self.map_idx = -1
+        for nid in list(self.markers):
+            if nid not in keep:
+                self.markers.pop(nid).delete()
+        if wipe_radio:
+            self.reset_nodedb()
         if self.iface:
             self.refresh()
         else:
@@ -2136,7 +2542,7 @@ class App:
         info = [("App version", VERSION + (" (installed app)" if getattr(sys, "frozen", False) else " (from source)")),
                 ("Windows / OS", platform.platform()),
                 ("Python", platform.python_version()),
-                ("Connection", "Wi-Fi" if self.cfg.get("mode") == "wifi" else "USB")]
+                ("Connection", {"wifi": "Wi-Fi", "ble": "Bluetooth"}.get(self.cfg.get("mode"), "USB"))]
         iface = self.iface
         if iface:
             try:
@@ -2160,9 +2566,8 @@ class App:
             self.feedback_win.deiconify()
             self.feedback_win.lift()
             return
-        win = self.feedback_win = tk.Toplevel(self.root, bg=BG)
-        win.title("Send feedback - Central Finite Curve")
-        win.attributes("-topmost", self.cfg.get("on_top", False))
+        win = self.feedback_win = self.side_panel(width=470, bg=CARD, scroll=True)
+        win.title("Send feedback")
         win.columnconfigure(1, weight=1)
         lab = dict(bg=BG, fg=FG, font=("Segoe UI", 9))
         tk.Label(win, text="Tell us what happened. Your report opens on GitHub for you to check and submit;\n"
@@ -2262,10 +2667,8 @@ class App:
             self.archive_win.deiconify()
             self.archive_win.lift()
             return
-        win = self.archive_win = tk.Toplevel(self.root, bg=BG)
-        win.title("Chat archive - Central Finite Curve")
-        win.geometry("760x520")
-        win.attributes("-topmost", self.cfg.get("on_top", False))
+        win = self.archive_win = self.side_panel(width=560, bg=CARD)
+        win.title("Chat archive")
         bar = tk.Frame(win, bg=BG)
         bar.pack(fill="x", padx=8, pady=8)
         tk.Label(bar, text="Search", bg=BG, fg=DIM, font=("Segoe UI", 9)).pack(side="left")
@@ -2310,6 +2713,8 @@ class App:
                             m = json.loads(line)
                             if float(m.get("t", 0)) < since or (want and self.msg_kind(m) != want):
                                 continue
+                            if self.is_deleted(m):
+                                continue  # deleted messages are gone from the archive too
                         except (ValueError, AttributeError, TypeError):
                             continue
                         if needle and needle not in f"{m.get('from', '')} {m.get('to', '')} {m.get('text', '')}".lower():
@@ -2377,7 +2782,11 @@ class App:
     def target(self):
         if DEMO:
             return "demo radio"
-        return self.cfg["host"] if self.cfg["mode"] == "wifi" else (self.port_used or self.cfg["port"])
+        if self.cfg["mode"] == "wifi":
+            return self.cfg["host"]
+        if self.cfg["mode"] == "ble":
+            return "Bluetooth " + (self.cfg.get("ble_address") or "(nearest radio)")
+        return self.port_used or self.cfg["port"]
 
     def find_port(self, port):
         """The configured port, or the one Meshtastic radio plugged in if that port has vanished
@@ -2441,6 +2850,38 @@ class App:
                 except OSError:
                     pass
 
+    def ble_scan(self, box, status):
+        """Scan for nearby Bluetooth Meshtastic radios and list their addresses in the settings box."""
+        status.config(text="Scanning… (~5 s)", fg=DIM)
+
+        def work():
+            try:
+                import meshtastic.ble_interface as ble
+                devices = ble.BLEInterface.scan() or []
+                found = []
+                for d in devices:
+                    dev = getattr(d, "device", d)
+                    addr = getattr(d, "address", None) or getattr(dev, "address", "")
+                    name = getattr(d, "name", None) or getattr(dev, "name", "") or "Meshtastic"
+                    if addr:
+                        found.append((name, addr))
+
+                def show():
+                    if not box.winfo_exists():
+                        return
+                    box["values"] = [a for _, a in found]
+                    if found:
+                        box.set(found[0][1])
+                        status.config(text=f"{len(found)} found · {found[0][0]}"[:40], fg=GOOD)
+                    else:
+                        status.config(text="None found — power the radio & unpair it from phones", fg=WARN)
+                self.q.put(("ui", show))
+            except Exception as e:
+                msg = str(e) or type(e).__name__
+                self.q.put(("ui", lambda: status.winfo_exists() and status.config(
+                    text=f"Scan failed: {msg}"[:50], fg=BAD)))
+        threading.Thread(target=work, daemon=True, name="ble-scan").start()
+
     def connect(self):
         self.connecting = True
         self.last_try = time.time()
@@ -2453,6 +2894,16 @@ class App:
                     iface = DemoInterface(self.home() or DEMO_CENTER, extra=DEMO_EXTRA)
                 elif self.cfg["mode"] == "wifi":
                     iface = meshtastic.tcp_interface.TCPInterface(hostname=self.cfg["host"])
+                elif self.cfg["mode"] == "ble":
+                    # NB: "import meshtastic.ble_interface as _ble" so we don't rebind the module-level
+                    # name `meshtastic` as a local in this function (that broke the serial branch).
+                    try:
+                        import meshtastic.ble_interface as _ble
+                    except Exception:
+                        self.q.put(("fail", "Bluetooth support isn't installed (pip install bleak)."))
+                        return
+                    addr = (self.cfg.get("ble_address") or "").strip() or None
+                    iface = _ble.BLEInterface(address=addr)
                 else:
                     port = None if self.cfg["port"].lower() == "auto" else self.cfg["port"]
                     port, moved = self.find_port(port)
@@ -2495,6 +2946,92 @@ class App:
     def _reconnect_go(self):
         if self.iface is None and not self.connecting and not self.paused:
             self.connect()
+
+    # ---------- auto-update ----------
+    def check_update(self, manual=False):
+        """Ask GitHub whether a newer release exists. Finds the newest release (prereleases included,
+        since the project ships -alpha builds) and, if it beats this VERSION, remembers it + tells you."""
+        if DEMO:
+            if manual:
+                self.note("Updates are off in demo mode.", "me")
+            return
+        self.cfg["update_check_last"] = time.time()
+        save_cfg(self.cfg)
+
+        def work():
+            try:
+                req = urllib.request.Request(UPDATE_API + "?per_page=15", headers={
+                    "Accept": "application/vnd.github+json", "User-Agent": "CentralFiniteCurve"})
+                with urllib.request.urlopen(req, timeout=15) as resp:
+                    rels = json.load(resp)
+            except Exception as e:
+                if manual:
+                    msg = str(e) or type(e).__name__
+                    self.q.put(("ui", lambda: self.note(f"Update check failed: {msg}"[:90], "me")))
+                return
+            best = None
+            for rel in rels or []:
+                if rel.get("draft"):
+                    continue
+                tag = rel.get("tag_name") or rel.get("name") or ""
+                if version_newer(tag, VERSION) and (best is None or version_newer(tag, best["tag_name"])):
+                    best = rel
+            if not best:
+                if manual:
+                    self.q.put(("ui", lambda: self.note(f"You're on the latest version ({VERSION}).", "me")))
+                self.update_info = None
+                return
+            asset = next((a for a in best.get("assets", [])
+                          if a.get("name", "").lower().endswith(".exe") and "setup" in a.get("name", "").lower()), None)
+            self.update_info = {"version": best.get("tag_name"), "page": best.get("html_url"),
+                                "url": asset.get("browser_download_url") if asset else None,
+                                "name": asset.get("name") if asset else None}
+            self.q.put(("ui", self._announce_update))
+        threading.Thread(target=work, daemon=True, name="update-check").start()
+
+    def _announce_update(self):
+        info = getattr(self, "update_info", None)
+        if not info:
+            return
+        self.note(f"Update available: {info['version']}. Open Settings and click "
+                  "“Download & install update”, or use the tray menu.", "dm")
+        if self.cfg["sound"]:
+            alert(self.cfg)
+
+    def apply_update(self):
+        """Download the new installer and run it (installed build), or open the releases page (from source)."""
+        info = getattr(self, "update_info", None)
+        if not info:
+            self.check_update(manual=True)
+            self.note("Checking for updates…", "me")
+            return
+        if not info.get("url") or not getattr(sys, "frozen", False):
+            webbrowser.open(info.get("page") or (REPO_URL + "/releases"))
+            return
+        if not messagebox.askyesno("Update Central Finite Curve",
+                                   f"Download and install {info['version']} now?\n\n"
+                                   "The app will close while the installer runs.", parent=self.root):
+            return
+        self.note(f"Downloading {info['version']}…", "me")
+
+        def work():
+            try:
+                dest = os.path.join(tempfile.gettempdir(), info.get("name") or "CentralFiniteCurve-Setup.exe")
+                urllib.request.urlretrieve(info["url"], dest)
+                self.q.put(("ui", lambda: self._run_installer(dest)))
+            except Exception as e:
+                msg = str(e) or type(e).__name__
+                self.q.put(("ui", lambda: self.note(f"Download failed: {msg}"[:90], "me")))
+        threading.Thread(target=work, daemon=True, name="update-download").start()
+
+    def _run_installer(self, path):
+        try:
+            os.startfile(path)  # Windows: launch the downloaded installer
+        except Exception:
+            log.warning("Couldn't launch the installer", exc_info=True)
+            webbrowser.open(REPO_URL + "/releases")
+            return
+        self.quit()
 
     def tick(self):
         if time.time() - getattr(self, "archive_trimmed", 0) > 86400:
@@ -2920,6 +3457,7 @@ class App:
 
         now = time.time()
         window = max(1, int(self.cfg.get("active_mins", ACTIVE_MINS))) * 60
+        keep_set = set(self.cfg.get("keep_on_clear") or [])  # location-test nodes, marked "★" and kept on clear
         others = []  # (last heard, id, name, node) for every node except us
         me_node = None
         for nid, n in nodes.items():
@@ -2959,19 +3497,17 @@ class App:
             name, n = me_node
             rows.append((my_id, ("me",), (
                 name, "-", "-", "", f"{batt}%" if batt is not None and batt <= 100 else "USB", "me")))
-        # A radio whose clock wasn't set stores the nodes it hears with no time. They're still real,
-        # so list them (after the timed ones, marked "?") instead of hiding them as if never heard.
+        # A radio whose clock wasn't set stores the nodes it hears with no time. Those (and any node
+        # we haven't heard from within the Active window) do NOT belong in Active — they drop out to
+        # History and the map, so the Active tab only ever shows nodes that are genuinely current.
         self.untimed = {nid: name for last, nid, name, n in others if not last and n.get("user")}
         for last, nid, name, n in sorted(others, key=lambda o: not o[0]):
-            if nid in self.untimed:
-                age = "?"
-            elif not last or now - last > window:
-                continue
-            else:
-                age = ago(last)
+            if not last or now - last > window:
+                continue  # stale or never-timestamped: it stays in History (and on the map), not Active
+            age = ago(last)
             b = n.get("deviceMetrics", {}).get("batteryLevel")
-            rows.append((nid, ("fresh",) if last and now - last < 300 else (), (
-                name,
+            rows.append((nid, ("kept",) if nid in keep_set else (("fresh",) if last and now - last < 300 else ()), (
+                ("★ " if nid in keep_set else "") + name,
                 f"{n['snr']:.1f}" if n.get("snr") is not None else "-",
                 self.rssi.get(nid, "-"),
                 n.get("hopsAway", "-"),
@@ -2985,8 +3521,8 @@ class App:
         rows = []
         for nid, h in sorted(self.history.items(), key=lambda kv: kv[1].get("last", 0), reverse=True):
             is_active = now - h.get("last", 0) <= window
-            rows.append((nid, ("fresh",) if is_active else ("gone",), (
-                h.get("name", nid),
+            rows.append((nid, ("kept",) if nid in keep_set else (("fresh",) if is_active else ("gone",)), (
+                ("★ " if nid in keep_set else "") + h.get("name", nid),
                 "● active" if is_active else ago(h.get("last")),
                 fmt(h.get("first")), fmt(h.get("last")),
                 h.get("count", 0) or "-",
@@ -3136,13 +3672,15 @@ class App:
         self.map_points = points
         for nid in list(self.markers):
             if nid not in points:
-                self.markers.pop(nid).delete()
+                m = self.markers.pop(nid, None)  # pop(…, None): never KeyError if it already went
+                if m is not None:
+                    m.delete()
         # faint circle showing how much an owner has blurred their location
         for nid in list(self.acc_polys):
             poly, key = self.acc_polys[nid]
-            if accuracy.get(nid) is None or key != (points[nid][:2], accuracy[nid]):
+            if nid not in points or accuracy.get(nid) is None or key != (points[nid][:2], accuracy[nid]):
                 poly.delete()
-                del self.acc_polys[nid]
+                self.acc_polys.pop(nid, None)
         for nid, acc in accuracy.items():
             if nid not in self.acc_polys:
                 lat, lon = points[nid][:2]
@@ -3335,13 +3873,9 @@ class App:
 
     def show_node_info(self, nid):
         title, sections, pos = self.node_details(nid)
-        if self.info_win and self.info_win.winfo_exists():
-            self.info_win.destroy()  # one card at a time
-        win = self.info_win = tk.Toplevel(self.root, bg=BG)
+        # side_panel() reuses the open drawer (one card at a time) instead of destroy+recreate
+        win = self.info_win = self.side_panel(width=440, bg=CARD)
         win.title(f"{title} — node info")
-        win.transient(self.root)
-        win.attributes("-topmost", self.cfg.get("on_top", False))
-        win.geometry(f"+{self.root.winfo_pointerx() + 12}+{max(0, self.root.winfo_pointery() - 40)}")
         body = tk.Frame(win, bg=PANEL)
         body.pack(fill="both", expand=True, padx=8, pady=(8, 0))
         # tab stop instead of space padding: spaces don't line up in a proportional font
@@ -3356,25 +3890,18 @@ class App:
             for label, value in rows:
                 txt.insert("end", f"{label}\t", "label")  # node names come from strangers: insert as plain text only
                 txt.insert("end", f"{value}\n", "value")
-        txt.config(state="disabled")
+        # size to the content lines (short cards show in full; long ones scroll), without the old
+        # wait-for-visible measuring that raced with the card being replaced or closed.
+        content_lines = int(txt.index("end-1c").split(".")[0])
+        txt.config(state="disabled", height=min(content_lines + len(sections) // 2 + 1, 40))
+        sb = ttk.Scrollbar(body, orient="vertical", command=txt.yview)
+        txt.config(yscrollcommand=sb.set)
+        sb.pack(side="right", fill="y")
         txt.pack(side="left", fill="both", expand=True)
-        # size to what's actually shown: wrapped values and the gaps above headings take extra lines
-        # (only measurable once the window is on screen; before that the text box is 1 pixel wide)
-        try:
-            win.wait_visibility(txt)
-            shown = (txt.count("1.0", "end", "displaylines") or [0])[0] + len(sections) // 2 + 1
-        except tk.TclError:  # closed before it appeared
-            return
-        fits = max(12, (win.winfo_screenheight() - 200) // 19)  # leave room for the buttons on small screens
-        txt.config(height=min(shown, fits))
-        if shown > fits:
-            bar = ttk.Scrollbar(body, orient="vertical", command=txt.yview)
-            txt.config(yscrollcommand=bar.set)
-            bar.pack(side="right", fill="y", before=txt)
 
         bar = tk.Frame(win, bg=BG)
         bar.pack(fill="x", padx=8, pady=8)
-        btn = dict(bg=PANEL, fg=FG, relief="flat", activebackground="#2c3a4a", font=("Segoe UI", 9))
+        btn = dict(bg=PANEL, fg=FG, relief="flat", activebackground=HOVER, font=("Segoe UI", 9))
         if pos:
             def copy():
                 win.clipboard_clear()
@@ -3654,7 +4181,7 @@ class App:
         save_cfg(self.cfg)
         if on:
             self.ac_next = 0
-            self.ac_credit.place(relx=0.0, rely=1.0, x=6, y=-44, anchor="sw")
+            self.ac_credit.place(in_=self.map, relx=0.0, rely=1.0, x=6, y=-44, anchor="sw")
             if self.map_center() is None:
                 self.set_status("Set a home location in Settings to see aircraft", WARN)
         else:
@@ -3739,7 +4266,7 @@ class App:
         """Fill in "From → To" for airline flights, looked up once per callsign (only when a card opens)."""
         cs = a["call"].upper().replace(" ", "")
         if not ROUTE_RE.match(cs):
-            label.config(text="Route: not an airline flight (no published route)")
+            label.config(text="No published route (private / general-aviation flight).", fg=DIM)
             return
         cache = getattr(self, "route_cache", None)
         if cache is None:
@@ -3748,18 +4275,26 @@ class App:
         def show(route):
             if not label.winfo_exists():
                 return
-            if not route:
-                label.config(text="Route: not found for this callsign")
-            elif not route_plausible(route, a["lat"], a["lon"]):
-                label.config(text="Route: the listed route doesn't match where it is, so it's not shown")
-            else:
-                o, d = route["_airports"][0], route["_airports"][-1]
-                label.config(text=f"Route: {o.get('iata') or o.get('icao')} ({o.get('location') or o.get('name')}) → "
-                                  f"{d.get('iata') or d.get('icao')} ({d.get('location') or d.get('name')})", fg=FG)
+            if not route or not route.get("_airports"):
+                label.config(text="No published route (usually a private / general-aviation flight).", fg=DIM)
+                return
+            aps = route["_airports"]
+            o, d = aps[0], aps[-1]
+
+            def place(ap):
+                code = ap.get("iata") or ap.get("icao") or "?"
+                where = ap.get("location") or ap.get("name") or ""
+                return f"{code}  ·  {where}" if where else code
+            lines = [f"Departs:   {place(o)}", f"Arrives:    {place(d)}"]
+            if len(aps) > 2:  # multi-leg: show the stop(s) in between
+                lines.insert(1, "Via:        " + ", ".join(place(x) for x in aps[1:-1]))
+            if not route_plausible(route, a["lat"], a["lon"]):
+                lines.append("(scheduled route — the aircraft may be on a different leg right now)")
+            label.config(text="\n".join(lines), fg=FG)
         if cs in cache:
             show(cache[cs])
             return
-        label.config(text="Route: looking up…")
+        label.config(text="Looking up the route…", fg=DIM)
 
         def work():
             route = None
@@ -3781,13 +4316,8 @@ class App:
         a = self.aircraft.get(hexid)
         if not a:
             return
-        if getattr(self, "ac_win", None) is not None and self.ac_win.winfo_exists():
-            self.ac_win.destroy()
-        win = self.ac_win = tk.Toplevel(self.root, bg=BG)
+        win = self.ac_win = self.side_panel(width=380, bg=CARD)
         win.title(f"{a['call']} - aircraft")
-        win.transient(self.root)
-        win.attributes("-topmost", self.cfg.get("on_top", False))
-        win.geometry(f"+{self.root.winfo_pointerx() + 12}+{max(0, self.root.winfo_pointery() - 40)}")
         home = self.map_center()
         dist = None
         if home:
@@ -3812,25 +4342,74 @@ class App:
                 txt.insert("end", f"{v}\n")  # plain text only
         txt.config(state="disabled")
         txt.pack(fill="both", expand=True, padx=8, pady=(8, 0))
-        route_lbl = tk.Label(win, text="", bg=BG, fg=DIM, font=("Segoe UI", 9), justify="left", wraplength=320)
-        route_lbl.pack(anchor="w", padx=12, pady=(6, 0))
+        tk.Label(win, text="ROUTE", bg=CARD, fg=AIRCRAFT, font=("Segoe UI", 8, "bold")).pack(
+            anchor="w", padx=12, pady=(8, 0))
+        route_lbl = tk.Label(win, text="Looking up the route…", bg=CARD, fg=DIM, font=("Segoe UI", 9),
+                             justify="left", wraplength=330)
+        route_lbl.pack(anchor="w", padx=12, pady=(1, 2))
         self.lookup_route(a, route_lbl)
         bar = tk.Frame(win, bg=BG)
         bar.pack(fill="x", padx=8, pady=8)
-        btn = dict(bg=PANEL, fg=FG, relief="flat", activebackground="#2c3a4a", font=("Segoe UI", 9))
+        btn = dict(bg=PANEL, fg=FG, relief="flat", activebackground=HOVER, font=("Segoe UI", 9))
+        tk.Button(bar, text="Show on map", command=lambda: self.jump_to_aircraft(hexid), **btn).pack(side="left")
         tk.Button(bar, text="Track on adsb.fi", **btn,
-                  command=lambda: webbrowser.open(f"https://globe.adsb.fi/?icao={a['hex'].lstrip('~')}")).pack(side="left")
+                  command=lambda: webbrowser.open(f"https://globe.adsb.fi/?icao={a['hex'].lstrip('~')}")).pack(side="left", padx=(6, 0))
         tk.Button(bar, text="Close", command=win.destroy, **btn).pack(side="right")
         win.bind("<Escape>", lambda e: win.destroy())
+
+    def jump_to_aircraft(self, hexid):
+        """Recenter the main map on this aircraft's last known position and show the Map tab."""
+        a = self.aircraft.get(hexid)
+        if not a or not self.map or a.get("lat") is None:
+            return
+        try:
+            self.tabs.select(self.map_tab)
+        except tk.TclError:
+            pass
+        self.map_fitted = True  # we're taking over the view; don't auto-fit over it
+        self.map.set_position(a["lat"], a["lon"])
+        if round(self.map.zoom) < 11:
+            self.map.set_zoom(11)
+        self.sync_map_awake()
+
+    def view_center(self):
+        """The current map viewport centre (where you're looking), or GPS/home before the map exists."""
+        if self.map:
+            try:
+                return self.map.get_position()
+            except Exception:
+                pass
+        return self.map_center()
+
+    def _on_map_move(self):
+        """Pan handler (debounced): if the view has moved well beyond the last internet-node fetch,
+        fetch again around the new centre so internet nodes follow where you look, worldwide."""
+        if self._move_job:
+            return
+        self._move_job = self.root.after(900, self._maybe_refetch_online)
+
+    def _maybe_refetch_online(self):
+        self._move_job = None
+        if not self.map or not self.cfg.get("online_nodes", True) or self.online_busy:
+            return
+        center = self.view_center()
+        last = self._online_center
+        radius = float(self.cfg.get("online_radius_km", 100))
+        # re-fetch once the view centre has drifted more than ~60% of the radius from the last fetch
+        if center and (last is None or km_between(center, last) > max(15.0, radius * 0.6)):
+            self.online_last = 0
+            self.refresh_online()
 
     def refresh_online(self):
         self.online_busy = True
         self.online_last = time.time()
-        my_id, my_pos = self.last_me
-        center = (my_pos["latitude"], my_pos["longitude"]) if my_pos.get("latitude") is not None else self.home()
+        # centre on WHERE YOU'RE LOOKING (the map view), so panning anywhere shows that area's internet
+        # nodes; fall back to the radio GPS / home before the map exists.
+        center = self.view_center()
         if center is None:
             self.online_busy = False  # nowhere to search around until GPS or a home location is set
             return
+        self._online_center = center
         radius = float(self.cfg.get("online_radius_km", 100))
 
         def work():
@@ -4426,11 +5005,29 @@ or 911 if someone is in danger) and to the nearest FAA Flight Standards District
         self.root.attributes("-topmost", self.cfg["on_top"])
         save_cfg(self.cfg)
 
+    def _apply_fullscreen(self, on):
+        try:
+            self.root.attributes("-fullscreen", bool(on))
+        except tk.TclError:
+            log.debug("Full screen not available", exc_info=True)
+        self.fullscreen = bool(on)
+        self.cfg["fullscreen"] = bool(on)
+        if hasattr(self, "fs_btn"):
+            self.fs_btn.config(text="🗗" if on else "⛶")  # exit vs enter glyph
+
+    def toggle_fullscreen(self, event=None):
+        self._apply_fullscreen(not getattr(self, "fullscreen", False))
+        save_cfg(self.cfg)
+
+    def exit_fullscreen(self, event=None):
+        if getattr(self, "fullscreen", False):
+            self._apply_fullscreen(False)
+            save_cfg(self.cfg)
+
     def open_settings(self):
-        win = tk.Toplevel(self.root, bg=BG)
-        win.title("Central Finite Curve settings")
-        win.transient(self.root)
-        win.grab_set()
+        win = self.side_panel(width=470, bg=CARD, scroll=True)
+        win.title("Settings")
+        win.columnconfigure(1, weight=1)
         mode = tk.StringVar(value=self.cfg["mode"])
         port = tk.StringVar(value=self.cfg["port"])
         host = tk.StringVar(value=self.cfg["host"])
@@ -4441,7 +5038,7 @@ or 911 if someone is in danger) and to the nearest FAA Flight Standards District
             widget.grid(row=r, column=1, sticky="we", padx=10, pady=6)
 
         opts = tk.Frame(win, bg=BG)
-        for val, text in (("serial", "USB cable"), ("wifi", "Wi-Fi")):
+        for val, text in (("serial", "USB cable"), ("wifi", "Wi-Fi"), ("ble", "Bluetooth")):
             tk.Radiobutton(opts, text=text, value=val, variable=mode, bg=BG, fg=FG,
                            selectcolor=PANEL, activebackground=BG).pack(side="left")
         row(0, "Connect by", opts)
@@ -4573,7 +5170,8 @@ or 911 if someone is in danger) and to the nearest FAA Flight Standards District
         trow.grid(row=16, column=1, sticky="we", padx=10, pady=(0, 6))
 
         def apply():
-            before = (self.cfg["mode"], self.cfg["port"], self.cfg["host"])
+            before = (self.cfg["mode"], self.cfg["port"], self.cfg["host"], self.cfg.get("ble_address", ""))
+            self.cfg["ble_address"] = ble_addr.get().strip()
             url = ntfy_url(push_topic.get())
             if url is not None and url != self.cfg.get("push_url", ""):
                 if url:
@@ -4636,7 +5234,7 @@ or 911 if someone is in danger) and to the nearest FAA Flight Standards District
                             sound_file=sounds.get(sound_name.get(), cur))
             save_cfg(self.cfg)
             win.destroy()
-            if before == (self.cfg["mode"], self.cfg["port"], self.cfg["host"]):
+            if before == (self.cfg["mode"], self.cfg["port"], self.cfg["host"], self.cfg.get("ble_address", "")):
                 if self.iface:
                     self.refresh()
                 return  # only sound/etc changed; keep the connection
@@ -4645,10 +5243,62 @@ or 911 if someone is in danger) and to the nearest FAA Flight Standards District
             if not self.paused:
                 self.set_status("Settings saved — reconnecting…", WARN)
 
+        # BLUETOOTH: address of the radio to connect to when Connect by = Bluetooth; Scan finds nearby ones
+        tk.Label(win, text="BLUETOOTH", bg=BG, fg=DIM, font=("Segoe UI", 8, "bold")).grid(
+            row=21, column=0, sticky="w", padx=10, pady=(12, 0))
+        ble_addr = tk.StringVar(value=self.cfg.get("ble_address", ""))
+        blerow = tk.Frame(win, bg=BG)
+        ble_box = ttk.Combobox(blerow, textvariable=ble_addr, width=26,
+                               values=([self.cfg["ble_address"]] if self.cfg.get("ble_address") else []))
+        ble_box.pack(side="left", fill="x", expand=True)
+        ble_status = tk.Label(blerow, text="blank = nearest radio", bg=BG, fg=DIM, font=("Segoe UI", 8))
+        tk.Button(blerow, text="Scan", bg=PANEL, fg=FG, relief="flat", font=("Segoe UI", 9),
+                  command=lambda: self.ble_scan(ble_box, ble_status)).pack(side="left", padx=(6, 0))
+        ble_status.pack(side="left", padx=(6, 0))
+        row(22, "Radio (when Connect\nby = Bluetooth)", blerow)
+
+        # WINDOW: full screen now, and whether to start in full screen every launch
+        tk.Label(win, text="WINDOW", bg=BG, fg=DIM, font=("Segoe UI", 8, "bold")).grid(
+            row=18, column=0, sticky="w", padx=10, pady=(12, 0))
+        fs_now = tk.BooleanVar(value=bool(getattr(self, "fullscreen", False)))
+        tk.Checkbutton(win, text="Full screen (F11 toggles; Esc exits)", variable=fs_now, bg=BG, fg=FG,
+                       selectcolor=PANEL, activebackground=BG, activeforeground=FG,
+                       font=("Segoe UI", 9)).grid(row=19, column=1, sticky="w", padx=10, pady=2)
+        fs_start = tk.BooleanVar(value=bool(self.cfg.get("fullscreen_on_start")))
+        tk.Checkbutton(win, text="Start in full screen every launch", variable=fs_start, bg=BG, fg=FG,
+                       selectcolor=PANEL, activebackground=BG, activeforeground=FG,
+                       font=("Segoe UI", 9)).grid(row=20, column=1, sticky="w", padx=10, pady=2)
+
+        # UPDATES: current version, a check/install button, and the daily auto-check toggle
+        tk.Label(win, text="UPDATES", bg=BG, fg=DIM, font=("Segoe UI", 8, "bold")).grid(
+            row=23, column=0, sticky="w", padx=10, pady=(12, 0))
+        uprow = tk.Frame(win, bg=BG)
+        tk.Label(uprow, text=f"Version {VERSION}", bg=BG, fg=FG, font=("Segoe UI", 9)).pack(side="left")
+        up_label = ("Download & install update" if getattr(self, "update_info", None) else "Check for updates")
+        tk.Button(uprow, text=up_label, bg=PANEL, fg=FG, relief="flat", font=("Segoe UI", 9),
+                  command=lambda: (self.apply_update() if getattr(self, "update_info", None)
+                                   else self.check_update(manual=True))).pack(side="left", padx=(10, 0))
+        uprow.grid(row=24, column=1, sticky="w", padx=10, pady=2)
+        auto_update = tk.BooleanVar(value=bool(self.cfg.get("auto_update", True)))
+        tk.Checkbutton(win, text="Check for updates automatically (once a day)", variable=auto_update, bg=BG,
+                       fg=FG, selectcolor=PANEL, activebackground=BG, activeforeground=FG,
+                       font=("Segoe UI", 9)).grid(row=24, column=0, sticky="w", padx=10, pady=(26, 2))
+
+        def apply_window():
+            self.cfg["fullscreen_on_start"] = bool(fs_start.get())
+            self.cfg["auto_update"] = bool(auto_update.get())
+            if bool(fs_now.get()) != bool(getattr(self, "fullscreen", False)):
+                self._apply_fullscreen(bool(fs_now.get()))
+        _orig_apply = apply
+
+        def apply():  # extend the existing Save to also apply window settings
+            apply_window()
+            _orig_apply()
+
         tk.Button(win, text="Save", command=apply, bg=ACCENT, fg="#000", relief="flat",
-                  width=10).grid(row=17, column=1, sticky="e", padx=10, pady=10)
+                  width=10).grid(row=25, column=1, sticky="e", padx=10, pady=10)
         tk.Button(win, text="Send feedback…", command=self.open_feedback, bg=PANEL, fg=FG, relief="flat",
-                  font=("Segoe UI", 9)).grid(row=17, column=0, sticky="w", padx=10, pady=10)
+                  font=("Segoe UI", 9)).grid(row=25, column=0, sticky="w", padx=10, pady=10)
         snd_box.bind("<<ComboboxSelected>>", lambda e: test())  # preview on pick
         win.protocol("WM_DELETE_WINDOW", apply)  # closing with X keeps changes too
 

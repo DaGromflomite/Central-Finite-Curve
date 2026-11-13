@@ -102,6 +102,19 @@ class Helpers(unittest.TestCase):
         mb = mw.memory_mb()
         self.assertTrue(mb is None or 5 < mb < 4000)
 
+    def test_version_newer(self):
+        # higher core version wins, with or without a v-prefix
+        self.assertTrue(mw.version_newer("v0.6.0-alpha", "0.5.0-alpha"))
+        self.assertTrue(mw.version_newer("0.5.1-alpha", "0.5.0-alpha"))
+        self.assertTrue(mw.version_newer("1.0.0", "0.9.9"))
+        # same version is not newer; older is not newer
+        self.assertFalse(mw.version_newer("0.5.0-alpha", "0.5.0-alpha"))
+        self.assertFalse(mw.version_newer("0.4.0-alpha", "0.5.0-alpha"))
+        # a final build outranks its prerelease of the same core; beta outranks alpha
+        self.assertTrue(mw.version_newer("0.5.0", "0.5.0-alpha"))
+        self.assertTrue(mw.version_newer("0.5.0-beta", "0.5.0-alpha"))
+        self.assertFalse(mw.version_newer("0.5.0-alpha", "0.5.0"))
+
 
 class UiPieces(unittest.TestCase):
     def test_alerts_are_rate_limited_and_off_thread(self):
@@ -735,7 +748,9 @@ class Gui(unittest.TestCase):
                                                                      "shortName": "NOCK"}}
             app.refresh()
             root.update()
-            r["untimed_listed"] = app.tree.exists("!0bad71e5") and app.tree.item("!0bad71e5")["values"][-1] == "?"
+            # a node with no timestamp is no longer genuinely "active": it drops out of the Active list
+            # (to History/the map) instead of lingering with a "?" — see the Active-window drop fix.
+            r["untimed_listed"] = app.tree.exists("!0bad71e5")
             r["untimed_mapped"] = "!0bad71e5" in app.map_points
             del app.iface.nodes["!0bad71e5"]
             # the radio says "heard a day ago" but we saved a packet from it an hour ago: we must believe ourselves
@@ -1014,7 +1029,7 @@ class Gui(unittest.TestCase):
         self.assertGreaterEqual(r["fit_zoom"], 6, "Fit all zoomed out too far (bad positions?)")
         self.assertEqual(r["null_island"], [])
         self.assertTrue(r["delivered"], "no delivery report for a direct message")
-        self.assertTrue(r["untimed_listed"], "a node with no timestamp was hidden from the Active list")
+        self.assertFalse(r["untimed_listed"], "a node with no timestamp should drop out of the Active list")
         self.assertTrue(r["untimed_mapped"], "a node with no timestamp was left off the map")
         self.assertTrue(r["stale_listed"], "a node we heard an hour ago was hidden because the radio's time was stale")
         self.assertTrue(r["online_in_dest"], "an internet-map node was missing from Message-to")
