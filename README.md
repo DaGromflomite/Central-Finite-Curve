@@ -108,6 +108,10 @@ The short version is below. For every button, setting and how-to, see the
 zip is there too if you would rather not install. Neither needs Python. After that, the app keeps
 itself up to date — it'll tell you when there's a new version and can install it for you.
 
+> **First run:** the app isn't code-signed yet, so Windows SmartScreen shows a blue "Windows
+> protected your PC" warning the first time. That's normal for a new indie app — click **More
+> info → Run anyway**.
+
 **From source** (Windows, or macOS at your own risk):
 
 ```bash
