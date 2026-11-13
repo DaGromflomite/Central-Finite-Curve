@@ -2,9 +2,9 @@
 
 ## 0.6.1-beta — 2026-11-12
 
-First beta. The feature set is all here now, so from this release on the focus is stability —
-and **the app updates itself**: it checks GitHub for new versions and can download and install them
-for you (Settings ▸ Updates, or the tray menu). A big usability + connectivity update, plus a new look.
+First beta — a big usability + connectivity update, plus a new look. The headline: **the app updates
+itself**, checking GitHub for new versions and downloading and installing them for you (Settings ▸
+Updates, or the tray menu).
 
 Also fixes a data-persistence bug: the installed app now keeps your settings, history and messages
 in your user folder (`%LOCALAPPDATA%`), so **they survive updates** instead of being replaced each time.

@@ -3,16 +3,17 @@
 **A desktop dashboard for a Meshtastic mesh, with live drone Remote ID tracking.**
 Created by **DaGromflomite**.
 
-Central Finite Curve connects to a Meshtastic radio over USB or TCP and shows you the mesh at a
-glance: the nodes your radio hears, where they sit on a live map, and the messages passing through.
-When a Remote ID drone detector is on the mesh, it also turns those alerts into a live flight path
-and identifies the drone's manufacturer from its MAC address.
+Central Finite Curve connects to a Meshtastic radio over USB, Bluetooth or Wi-Fi and shows you the
+mesh at a glance: the nodes your radio hears, where they sit on a live map, and the messages passing
+through. When a Remote ID drone detector is on the mesh, it also turns those alerts into a live
+flight path and identifies the drone's manufacturer from its MAC address. It even keeps itself up to
+date — once it's installed, it can check for new versions and install them for you.
 
-> **Alpha, and Windows-first.** This is early software under active development. Windows is the
-> platform it is built and tested on, and the Releases page carries a ready-to-run Windows
-> installer. **macOS is not ready yet:** the code is cross-platform and should run from source, but
-> it has never been launched on a Mac, so treat the macOS build as an untested, pre-alpha backup.
-> There is no prebuilt macOS app at this stage.
+> **Beta, and Windows-first.** It's in daily use and solid enough to lean on, with plenty still
+> planned. Windows is the platform it's built and tested on, and the Releases page carries a
+> ready-to-run Windows installer that updates itself from then on. **macOS isn't ready yet:** the
+> code is cross-platform and should run from source, but it has never been launched on a Mac, so
+> treat the macOS build as an untested, pre-alpha backup. There's no prebuilt macOS app yet.
 >
 > Central Finite Curve is free and open source under the GPL-3.0, and it is never for sale.
 
@@ -35,8 +36,9 @@ flight path, alongside the pilot's location and the manufacturer resolved from t
 
 ## How it works
 
-- Connect a **Meshtastic radio** (for example a Heltec V3) to your PC over USB. Central Finite Curve
-  talks to it through the Meshtastic Python API and listens to every channel you are on.
+- Connect a **Meshtastic radio** (for example a Heltec V3) to your PC over USB, Bluetooth or Wi-Fi.
+  Central Finite Curve talks to it through the Meshtastic Python API and listens to every channel
+  you are on.
 - The nodes it hears appear in the **Active** and **History** tables and on the **Map**, updated
   live as packets arrive.
 - For drone tracking, a **Remote ID detector** on the mesh — such as Colonel Panic's
@@ -52,13 +54,21 @@ flight path, alongside the pilot's location and the manufacturer resolved from t
 The short version is below. For every button, setting and how-to, see the
 [Feature guide](#feature-guide).
 
+- **Connect by USB, Bluetooth or Wi-Fi** — plug the radio in, or pair it over Bluetooth and go
+  wireless. Pick the one you want in Settings; for Bluetooth there's a **Scan** button that finds
+  nearby radios for you.
+- **Updates itself** — once installed, it checks GitHub for new versions and can download and
+  install them for you, from Settings or the tray. No more hunting for the latest download.
 - **Live node dashboard** — Active and History tables showing SNR, RSSI, hops, battery and last
-  heard.
+  heard. The Active list drops a node once it goes quiet, so it only ever shows what's current.
 - **Map** — your radio's nodes and, if you want them, internet nodes from meshmap.net, in dark or
   satellite styles, with a tile engine that is easy on memory and data and sleeps when off-screen.
-  A dropdown on the map lets you pick what you see: just the nodes that are active right now, the
-  ones heard in the last hour, day or month, or every node you've ever recorded. A checkbox shows
-  or hides the purple internet-map nodes, and **Clear map history** wipes the slate clean.
+  A neat bar of controls sits **above the map**: toggles for internet nodes, aircraft, airspace and
+  names, a dropdown to choose how far back to show nodes (active now, last hour, day, month, or
+  everything), **Fit all**, and **Clear history**. The internet nodes also follow wherever you pan,
+  so you can explore other areas, not just home.
+- **Full screen** — a button up top, **F11** to toggle, **Esc** to come back, and an option to
+  start in full screen every time.
 - **Message any node on the map** — click a pin and hit **Message**. A chat opens right there on
   the node's card, with your conversation so far and a box to reply in.
 - **Three message panels** — direct messages, drone alerts and channel traffic each get their own
@@ -95,7 +105,8 @@ The short version is below. For every button, setting and how-to, see the
 ## Installing
 
 **Windows:** download the installer from the [Releases](../../releases) page and run it. A portable
-zip is there too if you would rather not install. Neither needs Python.
+zip is there too if you would rather not install. Neither needs Python. After that, the app keeps
+itself up to date — it'll tell you when there's a new version and can install it for you.
 
 **From source** (Windows, or macOS at your own risk):
 
@@ -124,9 +135,11 @@ has one of these labels:
 
 ### The window at a glance
 
-From top to bottom: the **top bar** (connection status and buttons), the **drone banner** (only
-when a drone is about), a line of **radio info**, the **tabs** (Active, History, Map, Drone), the
-**message panels**, and the **send bar** at the bottom.
+From top to bottom: the **header** (logo and name), the **top bar** (connection status and buttons),
+the **drone banner** (only when a drone is about), a line of **radio info**, the **tabs** (Active,
+History, Map, Drone), the **message panels**, and the **send bar** at the bottom. Cards and dialogs
+— a node's info, an aircraft, Settings, Feedback, the archive — slide out from the right edge of the
+window rather than opening as separate pop-up windows.
 
 ### Top bar
 
@@ -136,6 +149,7 @@ when a drone is about), a line of **radio info**, the **tabs** (Active, History,
 | **Pause** / **Resume** | Lets go of the radio so another app (such as the Meshtastic phone or web app) can use the connection. Click again to reconnect. | ✅ |
 | **Search** | A bigger sweep for nodes. It nudges every node your radio knows to check in, and asks any radio within two hops to announce itself. Replies show up in Active within a minute or so. It can only be used every 12 seconds, so it can't flood the mesh. | ✅ |
 | **Reconnect** | Drops the connection and opens it again. Handy after you unplug or reflash the radio. | ✅ |
+| ⛶ | Full screen on or off. **F11** does the same, and **Esc** leaves full screen. | ✅ |
 | 📌 | Keeps the window on top of everything else. | ✅ |
 | ⚙ | Opens **Settings** (see below). | ✅ |
 
@@ -152,8 +166,9 @@ how many other nodes it knows.
 
 | What | How to use it | Status |
 |---|---|---|
-| Node list | Every node heard within the "Active" window (3 hours by default; change it in Settings). Shows name, SNR, RSSI, hops away, battery and when it was last heard. Nodes your radio knows but never timestamped show a "?" in Heard. | ✅ |
+| Node list | Every node heard within the "Active" window (3 hours by default; change it in Settings). Shows name, SNR, RSSI, hops away, battery and when it was last heard. Once a node goes quiet past that window it drops out of Active (it's still in History and on the map), so this list only ever shows what's current. | ✅ |
 | Click a node | Sets it as the recipient in the send bar, so you can message it straight away. | ✅ |
+| Right-click a node | **Keep on clear** pins it with a ★ so it survives a history clear (handy for a node you're testing), or open its card. | ✅ |
 
 ### History tab
 
@@ -168,12 +183,14 @@ how many other nodes it knows.
 |---|---|---|
 | Pins | **Green**: active nodes. **Grey**: heard before, but not lately. **Purple**: nodes from the internet map (meshmap.net). **Amber outline**: repeaters and routers. **Hollow pin**: a node your radio heard that never sent a location. It's placed in a ring around you so you can still click it; it is *not* its real position. | ✅ |
 | Click a pin | Opens the node's **info card**: identity, hardware, location, signal and more, with **Copy location**, **Google Maps** and **Message** buttons. | ✅ |
-| **Node dropdown** (top right) | Choose what's on the map: *Nodes currently active* (no grey pins), *Nodes active in the last hour*, *…last day*, *…last month*, or *All recorded nodes*. Your choice is remembered. | 🧪 |
-| **Show internet-map nodes (purple)** | Tick or untick to show or hide nodes from meshmap.net. They're fetched every 10 minutes within the radius you set in Settings. | ✅ |
-| **Show aircraft (adsb.fi)** | Planes and helicopters near you, as cyan arrows pointing the way they're flying, labelled with callsign and altitude when you're zoomed in. Emergencies are red. Click one for its type, registration, speed, distance and, for airline flights, where it's flying from and to; or follow it on adsb.fi. Updates every 15 seconds while the map is on screen. | 🧪 |
-| **Show airspace & no-fly zones (FAA, US)** | Outlines airport airspace (Class B, C, D and E surface areas, in blues and purple) and active temporary flight restrictions (red). Click an outline for its name, altitudes and times. | 🧪 |
+| Controls bar (above the map) | The toggles and buttons live in a tidy bar across the top of the map, rather than floating on top of it: **Fit all**, the time-range dropdown, **Clear history**, and the layer toggles **Internet / Aircraft / Airspace / Names**. | ✅ |
+| **Time range** dropdown | Choose what's on the map: *Nodes currently active* (no grey pins), *active in the last hour*, *…last day*, *…last month*, or *All recorded nodes*. Your choice is remembered. | ✅ |
+| **Internet** | Show or hide the purple nodes from meshmap.net. They're fetched every 10 minutes within the radius you set in Settings, and follow wherever you pan the map, so you can look at other areas too. | ✅ |
+| **Aircraft** | Planes and helicopters near you, drawn as little plane/helicopter icons pointing the way they're flying, labelled with callsign and altitude when you're zoomed in. Emergencies are red. Click one for its type, registration, speed, distance and, for airline flights, a **ROUTE** panel showing where it departs and arrives; there's a **Show on map** button to jump to it, or follow it on adsb.fi. Updates every 15 seconds while the map is on screen. | 🧪 |
+| **Airspace** | Outlines airport airspace (Class B, C, D and E surface areas, in blues and purple) and active temporary flight restrictions (red), US/FAA data. Click an outline for its name, altitudes and times. | 🧪 |
+| **Names** | Show or hide the text labels on every pin, to declutter a busy map. Names are still there on the pins' cards. | ✅ |
 | Red drone pins | Drones flying right now (heard in the last 3 minutes), so you can see them beside aircraft and nodes. Click one to jump to the Drone tab. | 🧪 |
-| **Clear map history** | Removes every recorded node from the map and the History tab, after asking first. A backup is saved as `nodes-history-backup.json`. Nodes still in your radio's own list come straight back. | 🧪 |
+| **Clear history…** | Clears the History tab and the map, after asking first. It keeps your own node and any you've pinned with **Keep on clear** (★), and can also wipe the radio's own node memory so cleared nodes don't come straight back. A backup is saved as `nodes-history-backup.json`. | ✅ |
 | **Fit all** | Zooms to fit every pin. | ✅ |
 | **+ / − and the slider** | Zoom in and out. The scroll wheel works too. | ✅ |
 | Bottom bar: **All / Nodes / Repeaters**, **◀ ▶** | Step through the pins one by one, optionally only repeaters or only regular nodes. Click the name in the bar to open its card. | ✅ |
@@ -227,7 +244,7 @@ preset and channel as your radio (by default a channel called **DroneAlert**).
 | **Channel traffic** | Every public message on the channels your radio is on, with the channel name. | 🧪 |
 | Drag the gaps | Resize the panels. | 🧪 |
 | **Open in window ↗** | Pops a panel into its own window that keeps updating live. Each window has its own send bar: a recipient picker for direct messages, a channel picker for channel traffic, and **Show on map** plus sending on the drone channel for drone alerts. **Clear all** is there too. | 🧪 |
-| **Right-click a message** | **Archive this message**, **Archive whole conversation with [name]**, or **Open [name]'s card**. Archiving only hides messages from the panels; they stay in the archive, and anything new from that node still shows. | 🧪 |
+| **Right-click a message** | **Reply to [name]** (points the send bar straight at whoever sent it), **Delete this message** (gone for good, from the panels and the archive), **Archive this message**, **Archive whole conversation with [name]**, or **Open [name]'s card**. Archiving only hides messages from the panels — they stay in the archive and anything new still shows; deleting is permanent. | ✅ |
 | **Clear** (above the panels) | Empties the panels. Your messages stay in the archive. | 🧪 |
 | **Archive** (above the panels) | Opens the chat archive (see below). | 🧪 |
 
@@ -266,22 +283,25 @@ message to Everyone.
 
 | Setting | What it does | Status |
 |---|---|---|
-| **Connect by** | USB (serial) or Wi-Fi. | ✅ USB / ⚠️ Wi-Fi less tested |
+| **Connect by** | USB cable, Wi-Fi, or **Bluetooth**. | ✅ USB / ⚠️ Wi-Fi less tested / 🧪 Bluetooth |
 | **USB port (or auto)** | Your radio's COM port, or `auto`. If the port changes, it only switches to a radio with the same node ID, so it never grabs someone else's device. | ✅ |
 | **Wi-Fi IP address** | For radios connected over the network. | ⚠️ |
+| **Bluetooth radio + Scan** | When Connect by is Bluetooth: click **Scan** to list nearby radios and pick yours, or leave it blank for the nearest. First-time pairing uses the Meshtastic PIN shown on the radio (or the fixed PIN if you've set one). | 🧪 |
 | **Sound on new message** | Plays a sound when a message arrives (at most one every 3 seconds). | ✅ |
 | **Play sound on** | Pick a speaker or headset. | ✅ |
 | **Alert sound** | Choose a sound; it plays a preview when you pick one. | ✅ |
 | **Active = heard in last (min)** | How recent a node must be to count as active (default 180). | ✅ |
 | **Map style** | Dark, Street or Satellite. | ✅ |
 | **Online nodes within (km)** | Radius for internet-map nodes around you. | ✅ |
-| **Aircraft within (nautical mi)** | How far out to show aircraft (default 25, up to 250). | 🧪 |
+| **Aircraft: at least (nautical mi)** | How far out to show aircraft (default 50, up to 250). | 🧪 |
 | **Home location** | Where your node sits on the map if it has no GPS. Paste "lat, lon" straight from Google Maps. It stays on your PC and is never sent over the mesh. | ✅ |
 | **Transient tracking** | How often it checks for nodes passing through: Off, Light (3 min, default), Active (1 min) or Real-time (20 s). These checks only reach radios right next to you and are never relayed, so they don't add traffic to the wider mesh. | ✅ |
 | **Keep chat archive** | How long messages are kept (see Chat archive). | 🧪 |
 | **Phone alerts: topic** | Your ntfy topic or link; **New private topic** makes a random one. Blank turns phone alerts off. | 🧪 |
 | **Phone alerts: Send to phone** | Drone alerts only, drone alerts + direct messages, or every message. | 🧪 |
 | **Phone alerts: Send test** | Sends a test notification so you know it works. | 🧪 |
+| **Window: Full screen** | Go full screen now, and/or **Start in full screen every launch** (off by default). | ✅ |
+| **Updates** | Shows the version you're on, a button to **check for updates** (or **download & install** when one's waiting), and a switch to check automatically once a day. | 🧪 |
 | **Send feedback…** (bottom left) | Opens the feedback form (see Feedback below). | 🧪 |
 
 ### System tray
@@ -290,8 +310,9 @@ message to Everyone.
 |---|---|---|
 | Tray icon | Its colour shows the connection status, it gets a marker when there are unread messages, and hovering over it shows the status and how many are new. Closing the window only hides it to the tray. | ✅ |
 | **Show / hide**, **Pause / resume**, **Settings**, **Clear messages** | Same as the buttons in the window. | ✅ |
+| **Check for updates** | Looks for a newer version and, if there's one, offers to download and install it. | 🧪 |
 | **Send feedback** | Opens the feedback form. | 🧪 |
-| **Quit Central Finite Curve** | The only way to close it completely. Use this before updating. | ✅ |
+| **Quit Central Finite Curve** | The only way to close it completely. | ✅ |
 
 ### Behind the scenes
 
@@ -301,6 +322,8 @@ message to Everyone.
 | Reconnects by itself when the radio is unplugged and plugged back in. | ✅ |
 | Sets your radio's clock from your PC when it connects (and every 6 hours), so radios without GPS keep correct times. | ✅ |
 | Moves the window back on screen if it was left on a monitor that's no longer plugged in. | ✅ |
+| Keeps itself up to date: checks GitHub about once a day and can download and install new versions for you (turn it off in Settings). | 🧪 |
+| Stores your settings, history and messages in your user folder, so updating the app never wipes them. | ✅ |
 | Writes an error log to `mesh_widget.log` (kept small) to help track down problems. | ✅ |
 | **Demo mode:** start it with `--demo` (for example `CentralFiniteCurve.exe --demo`, or `python mesh_widget.pyw --demo`) for a pretend mesh full of tricky nodes, without touching your radio. | ✅ |
 | Phone alerts through ntfy (see below). | ✅ drone alerts / 🧪 messages and the Settings box |
@@ -344,7 +367,7 @@ as high priority; ordinary messages as normal priority.
 `mesh_widget.log` for a "Phone push failed" line; it says why. Your drone channel needs to be called
 **DroneAlert** for drone alerts to be recognised. If yours has another name, quit the app and add
 `"push_channel": "YourChannelName",` to `config.json` (installed version:
-`%LOCALAPPDATA%\Programs\Central Finite Curve\_internal\config.json`).
+`%LOCALAPPDATA%\Central Finite Curve\config.json`).
 
 **Privacy:** alerts travel over the internet to the ntfy server, and drone alerts include the
 drone's and pilot's coordinates. Keep your topic name to yourself. It's saved only in `config.json`
@@ -389,10 +412,12 @@ Curve is GPL-3.0 as well. That keeps it free and open for good: anyone may use, 
 but forks and derivatives must stay open source under the GPL and must keep this attribution to the
 original author. See [LICENSE](LICENSE) for the full text.
 
-## Known issues (alpha)
+## Known issues (beta)
 
 - Direct messages to a node your radio has never heard won't go through until that node answers
   the key request (see Messaging above). Nodes that are out of range will never answer.
+- Bluetooth: connecting over BLE can be slow the first time, and disconnecting can lag — the window
+  stays responsive, but give a Bluetooth reconnect a moment.
 - The map uses online tiles, so keep the providers' terms in mind, along with your data plan on
   cellular connections.
 - Tray and sound behaviour varies a little between operating systems.
