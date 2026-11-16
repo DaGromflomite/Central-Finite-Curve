@@ -57,8 +57,8 @@ The short version is below. For every button, setting and how-to, see the
 - **Connect by USB, Bluetooth or Wi-Fi** — plug the radio in, or pair it over Bluetooth and go
   wireless. Pick the one you want in Settings; for Bluetooth there's a **Scan** button that finds
   nearby radios for you.
-- **Updates itself** — once installed, it checks GitHub for new versions and can download and
-  install them for you, from Settings or the tray. No more hunting for the latest download.
+- **Updates itself** — once installed, it checks for new versions on every start and every 3 hours, downloads them in
+  the background, and installs with one click. No more hunting for the latest download.
 - **Live node dashboard** — Active and History tables showing SNR, RSSI, hops, battery and last
   heard. The Active list drops a node once it goes quiet, so it only ever shows what's current.
 - **Map** — your radio's nodes and, if you want them, internet nodes from meshmap.net, in dark or
@@ -104,9 +104,14 @@ The short version is below. For every button, setting and how-to, see the
 
 ## Installing
 
-**Windows:** download the installer from the [Releases](../../releases) page and run it. A portable
-zip is there too if you would rather not install. Neither needs Python. After that, the app keeps
-itself up to date — it'll tell you when there's a new version and can install it for you.
+**Windows:** **[⬇ Download the installer](https://github.com/DaGromflomite/Central-Finite-Curve/releases/latest/download/CentralFiniteCurve-Setup.exe)** (always the newest version) and run it.
+A portable zip is on the [Releases](../../releases) page if you would rather not install. Neither
+needs Python.
+
+After that, **the app keeps itself up to date.** Every time it starts, and every 3 hours while it's
+open, it checks for a new version. When it finds one it downloads it in the background, then asks
+once whether to install. Say yes and it closes for a few seconds, installs, and reopens by itself.
+Your settings and history are kept. (Turn this off in Settings ▸ Updates.)
 
 > **First run:** the app isn't code-signed yet, so Windows SmartScreen shows a blue "Windows
 > protected your PC" warning the first time. That's normal for a new indie app — click **More
@@ -305,7 +310,7 @@ message to Everyone.
 | **Phone alerts: Send to phone** | Drone alerts only, drone alerts + direct messages, or every message. | 🧪 |
 | **Phone alerts: Send test** | Sends a test notification so you know it works. | 🧪 |
 | **Window: Full screen** | Go full screen now, and/or **Start in full screen every launch** (off by default). | ✅ |
-| **Updates** | Shows the version you're on, a button to **check for updates** (or **download & install** when one's waiting), and a switch to check automatically once a day. | 🧪 |
+| **Updates** | Shows the version you're on, a button to **check for updates** (or **download & install** when one's waiting), and a switch to check automatically (at start-up and every 3 hours). | 🧪 |
 | **Send feedback…** (bottom left) | Opens the feedback form (see Feedback below). | 🧪 |
 
 ### System tray
@@ -326,7 +331,7 @@ message to Everyone.
 | Reconnects by itself when the radio is unplugged and plugged back in. | ✅ |
 | Sets your radio's clock from your PC when it connects (and every 6 hours), so radios without GPS keep correct times. | ✅ |
 | Moves the window back on screen if it was left on a monitor that's no longer plugged in. | ✅ |
-| Keeps itself up to date: checks GitHub about once a day and can download and install new versions for you (turn it off in Settings). | 🧪 |
+| Keeps itself up to date: checks GitHub every time it starts and every 3 hours, downloads new versions in the background and asks before installing (turn it off in Settings). | 🧪 |
 | Stores your settings, history and messages in your user folder, so updating the app never wipes them. | ✅ |
 | Writes an error log to `mesh_widget.log` (kept small) to help track down problems. | ✅ |
 | **Demo mode:** start it with `--demo` (for example `CentralFiniteCurve.exe --demo`, or `python mesh_widget.pyw --demo`) for a pretend mesh full of tricky nodes, without touching your radio. | ✅ |

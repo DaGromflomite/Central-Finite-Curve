@@ -22,6 +22,7 @@ import urllib.request
 import webbrowser
 import os
 import shutil
+import subprocess
 import tempfile
 import queue
 import threading
@@ -88,7 +89,7 @@ def asset_path(name):
     """Path to a bundled asset (icons), working from source and from a PyInstaller build."""
     base = getattr(sys, "_MEIPASS", HERE)
     return os.path.join(base, "assets", name)
-VERSION = "0.6.2-beta"
+VERSION = "0.6.3-beta"
 HEALTH_SECS = 600   # how often a health line (memory, CPU, nodes) goes into the log
 DEMO = False        # --demo: made-up nodes instead of a radio, with its own files (see enable_demo)
 log = logging.getLogger("centralfinitecurve")
@@ -769,7 +770,7 @@ DISK_CACHE_MB = 150       # downloaded tiles kept on disk so they aren't fetched
 DISK_CACHE_DAYS = 30      # then re-fetched, so map changes still come through
 REPO_URL = "https://github.com/DaGromflomite/Central-Finite-Curve"
 UPDATE_API = "https://api.github.com/repos/DaGromflomite/Central-Finite-Curve/releases"
-UPDATE_CHECK_SECS = 24 * 3600  # check GitHub for a newer release at most once a day
+UPDATE_CHECK_SECS = 3 * 3600  # while running, re-check GitHub for a newer release every 3 hours
 
 
 def version_newer(remote, local):
@@ -1705,9 +1706,9 @@ class App:
         self.root.bind("<Escape>", self.exit_fullscreen)  # Esc leaves full screen
         if self.cfg.get("fullscreen_on_start"):
             self.root.after(120, lambda: self._apply_fullscreen(True))
-        # auto-update: check GitHub shortly after startup, at most once a day (toggle in Settings)
-        if self.cfg.get("auto_update", True) and not DEMO and \
-                time.time() - float(self.cfg.get("update_check_last", 0) or 0) > UPDATE_CHECK_SECS:
+        # auto-update: check GitHub on EVERY launch (a few seconds in), then every few hours
+        # from tick(); toggle in Settings
+        if self.cfg.get("auto_update", True) and not DEMO:
             self.root.after(8000, self.check_update)
         self.root.after(200, self.pump)
         self.root.after(500, self.tick)
@@ -3017,10 +3018,53 @@ class App:
         info = getattr(self, "update_info", None)
         if not info:
             return
+        # Installed build with automatic updates on: fetch the installer in the background
+        # straight away, then ask once whether to install it now.
+        if self.cfg.get("auto_update", True) and info.get("url") and getattr(sys, "frozen", False):
+            if getattr(self, "update_file", None) and self.update_file[0] == info["version"]:
+                return  # already downloaded and offered this one
+            self.note(f"Update {info['version']} found, downloading it in the background…", "me")
+            self._download_update(info, ask=True)
+            return
         self.note(f"Update available: {info['version']}. Open Settings and click "
                   "“Download & install update”, or use the tray menu.", "dm")
         if self.cfg["sound"]:
             alert(self.cfg)
+
+    def _download_update(self, info, ask):
+        """Download the installer for `info` on a worker thread. ask=True: offer to install
+        when it's done (automatic path); ask=False: install right away (user already said yes)."""
+        if getattr(self, "update_downloading", False):
+            return
+        self.update_downloading = True
+
+        def work():
+            try:
+                dest = os.path.join(tempfile.gettempdir(), info.get("name") or "CentralFiniteCurve-Setup.exe")
+                tmp = dest + ".part"
+                urllib.request.urlretrieve(info["url"], tmp)
+                os.replace(tmp, dest)  # only a complete download is ever run
+                self.update_file = (info["version"], dest)
+                self.q.put(("ui", (lambda: self._offer_install(info, dest)) if ask
+                            else (lambda: self._run_installer(dest))))
+            except Exception as e:
+                msg = str(e) or type(e).__name__
+                self.q.put(("ui", lambda: self.note(f"Update download failed: {msg}"[:90], "me")))
+            finally:
+                self.update_downloading = False
+        threading.Thread(target=work, daemon=True, name="update-download").start()
+
+    def _offer_install(self, info, path):
+        if self.cfg["sound"]:
+            alert(self.cfg)
+        if messagebox.askyesno("Update ready",
+                               f"Central Finite Curve {info['version']} has been downloaded.\n\n"
+                               "Install it now? The app closes for a few seconds and reopens "
+                               "by itself. Your settings and history are kept.", parent=self.root):
+            self._run_installer(path)
+        else:
+            self.note(f"Update {info['version']} is downloaded. Install it any time from "
+                      "Settings ▸ Updates or the tray menu.", "dm")
 
     def apply_update(self):
         """Download the new installer and run it (installed build), or open the releases page (from source)."""
@@ -3032,29 +3076,36 @@ class App:
         if not info.get("url") or not getattr(sys, "frozen", False):
             webbrowser.open(info.get("page") or (REPO_URL + "/releases"))
             return
+        ready = getattr(self, "update_file", None)
+        if ready and ready[0] == info["version"] and os.path.exists(ready[1]):
+            self._run_installer(ready[1])  # already downloaded in the background
+            return
         if not messagebox.askyesno("Update Central Finite Curve",
                                    f"Download and install {info['version']} now?\n\n"
-                                   "The app will close while the installer runs.", parent=self.root):
+                                   "The app closes for a few seconds and reopens by itself.",
+                                   parent=self.root):
             return
         self.note(f"Downloading {info['version']}…", "me")
-
-        def work():
-            try:
-                dest = os.path.join(tempfile.gettempdir(), info.get("name") or "CentralFiniteCurve-Setup.exe")
-                urllib.request.urlretrieve(info["url"], dest)
-                self.q.put(("ui", lambda: self._run_installer(dest)))
-            except Exception as e:
-                msg = str(e) or type(e).__name__
-                self.q.put(("ui", lambda: self.note(f"Download failed: {msg}"[:90], "me")))
-        threading.Thread(target=work, daemon=True, name="update-download").start()
+        self._download_update(info, ask=False)
 
     def _run_installer(self, path):
+        """Run the installer quietly (progress bar only, no wizard pages), then reopen the app.
+        A detached cmd waits for the installer to finish and starts the new exe, because
+        Inno skips its own "launch" step in silent mode."""
         try:
-            os.startfile(path)  # Windows: launch the downloaded installer
+            exe = sys.executable  # the installed CentralFiniteCurve.exe
+            cmd = (f'start "" /wait "{path}" /SILENT /SUPPRESSMSGBOXES /NORESTART /CLOSEAPPLICATIONS '
+                   f'& start "" "{exe}"')
+            subprocess.Popen(["cmd", "/c", cmd], creationflags=0x00000008 | 0x00000200,  # DETACHED, NEW_GROUP
+                             close_fds=True)
         except Exception:
-            log.warning("Couldn't launch the installer", exc_info=True)
-            webbrowser.open(REPO_URL + "/releases")
-            return
+            log.warning("Couldn't launch the installer quietly; opening it normally", exc_info=True)
+            try:
+                os.startfile(path)
+            except Exception:
+                log.warning("Couldn't launch the installer", exc_info=True)
+                webbrowser.open(REPO_URL + "/releases")
+                return
         self.quit()
 
     def tick(self):
@@ -3063,6 +3114,10 @@ class App:
             cut = trim_archive(LOG_PATH, self.archive_days())
             if cut:
                 log.info("Chat archive: removed %d messages older than the keep setting", cut)
+        # an app left running still re-checks for updates every few hours (not just at startup)
+        if self.cfg.get("auto_update", True) and not DEMO and \
+                time.time() - float(self.cfg.get("update_check_last", 0) or 0) > UPDATE_CHECK_SECS:
+            self.check_update()
         if (not self.paused and self.iface is None and not self.connecting
                 and time.time() - self.last_try > RETRY_SECS):
             self.connect()
@@ -5304,7 +5359,7 @@ or 911 if someone is in danger) and to the nearest FAA Flight Standards District
                                    else self.check_update(manual=True))).pack(side="left", padx=(10, 0))
         uprow.grid(row=24, column=1, sticky="w", padx=10, pady=2)
         auto_update = tk.BooleanVar(value=bool(self.cfg.get("auto_update", True)))
-        tk.Checkbutton(win, text="Check for updates automatically (once a day)", variable=auto_update, bg=BG,
+        tk.Checkbutton(win, text="Check for updates automatically (at start-up and every 3 hours)", variable=auto_update, bg=BG,
                        fg=FG, selectcolor=PANEL, activebackground=BG, activeforeground=FG,
                        font=("Segoe UI", 9)).grid(row=24, column=0, sticky="w", padx=10, pady=(26, 2))
 
