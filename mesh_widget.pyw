@@ -88,7 +88,7 @@ def asset_path(name):
     """Path to a bundled asset (icons), working from source and from a PyInstaller build."""
     base = getattr(sys, "_MEIPASS", HERE)
     return os.path.join(base, "assets", name)
-VERSION = "0.6.1-beta"
+VERSION = "0.6.2-beta"
 HEALTH_SECS = 600   # how often a health line (memory, CPU, nodes) goes into the log
 DEMO = False        # --demo: made-up nodes instead of a radio, with its own files (see enable_demo)
 log = logging.getLogger("centralfinitecurve")
@@ -1922,6 +1922,18 @@ class App:
         self.tabs.add(f1, text="Active")
         self.tabs.add(f2, text="History")
 
+        # "Clear history…" lives on the History tab (moved off the Map toolbar);
+        # a bar ACROSS THE TOP of the tab (above the list) so it's the first thing you see,
+        # in the warning red so it reads as a real action rather than fading into the panel.
+        hist_bar = tk.Frame(f2, bg=BG)
+        hist_bar.pack(side="top", fill="x", before=self.hist_tree)
+        tk.Label(hist_bar, text="Every node ever heard", fg=DIM, bg=BG,
+                 font=("Segoe UI", 9)).pack(side="left", padx=10)
+        tk.Button(hist_bar, text="🗑  Clear history…", command=self.clear_map_history,
+                  bg=CARD, fg=BAD, relief="flat", activebackground=HOVER, activeforeground=BAD,
+                  font=("Segoe UI", 10, "bold"), bd=0, padx=14, pady=5,
+                  cursor="hand2").pack(side="right", padx=8, pady=6)
+
         self.map = None
         self.markers = {}      # node id -> map marker
         self.map_fitted = False
@@ -1958,8 +1970,6 @@ class App:
             self.seen_box.bind("<<ComboboxSelected>>", lambda e: self.set_map_seen(
                 next(k for k, label in MAP_SEEN if label == self.seen_box.get())))
             self.seen_box.pack(side="left", padx=8)
-            tk.Button(row1, text="Clear history…", command=self.clear_map_history,
-                      **dict(tbtn, fg=DIM)).pack(side="right")
 
             def layer(parent, text, var, cmd, colour):
                 return tk.Checkbutton(parent, text=text, variable=var, command=cmd, bg=BG, fg=colour,
