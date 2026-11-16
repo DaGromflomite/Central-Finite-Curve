@@ -1,11 +1,17 @@
 # Changelog
 
+## 0.6.4-beta — 2026-11-15
+
+- **Update checks are once a day again.** 0.6.3 checked at every start and every 3 hours, which
+  was more often than needed. It now checks at most once a day, whether the app is restarted or left
+  running. When it finds an update, it still downloads it in the background and asks once before
+  installing.
+
 ## 0.6.3-beta — 2026-11-15
 
 Updates now take care of themselves.
 
-- **Automatic updates download by themselves.** The app checks for a new version every time it
-  starts and every 3 hours while it's open. When it finds one, it downloads it in the background and
+- **Automatic updates download by themselves.** The app checks for a new version. When it finds one, it downloads it in the background and
   asks once: install now? Say yes and the app closes for a few seconds, installs quietly, and reopens
   by itself. Say later and it's ready to go from Settings ▸ Updates or the tray menu.
 - **One-click download link.** The README now has a direct link that always gets the newest
