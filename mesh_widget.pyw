@@ -89,7 +89,7 @@ def asset_path(name):
     """Path to a bundled asset (icons), working from source and from a PyInstaller build."""
     base = getattr(sys, "_MEIPASS", HERE)
     return os.path.join(base, "assets", name)
-VERSION = "0.6.3-beta"
+VERSION = "0.6.4-beta"
 HEALTH_SECS = 600   # how often a health line (memory, CPU, nodes) goes into the log
 DEMO = False        # --demo: made-up nodes instead of a radio, with its own files (see enable_demo)
 log = logging.getLogger("centralfinitecurve")
@@ -770,7 +770,7 @@ DISK_CACHE_MB = 150       # downloaded tiles kept on disk so they aren't fetched
 DISK_CACHE_DAYS = 30      # then re-fetched, so map changes still come through
 REPO_URL = "https://github.com/DaGromflomite/Central-Finite-Curve"
 UPDATE_API = "https://api.github.com/repos/DaGromflomite/Central-Finite-Curve/releases"
-UPDATE_CHECK_SECS = 3 * 3600  # while running, re-check GitHub for a newer release every 3 hours
+UPDATE_CHECK_SECS = 24 * 3600  # check GitHub for a newer release at most once a day
 
 
 def version_newer(remote, local):
@@ -1706,9 +1706,9 @@ class App:
         self.root.bind("<Escape>", self.exit_fullscreen)  # Esc leaves full screen
         if self.cfg.get("fullscreen_on_start"):
             self.root.after(120, lambda: self._apply_fullscreen(True))
-        # auto-update: check GitHub on EVERY launch (a few seconds in), then every few hours
-        # from tick(); toggle in Settings
-        if self.cfg.get("auto_update", True) and not DEMO:
+        # auto-update: at most once a day — at launch if a day has passed since the last check,
+        # otherwise tick() picks it up once the day is up; toggle in Settings
+        if self.cfg.get("auto_update", True) and not DEMO and                 time.time() - float(self.cfg.get("update_check_last", 0) or 0) > UPDATE_CHECK_SECS:
             self.root.after(8000, self.check_update)
         self.root.after(200, self.pump)
         self.root.after(500, self.tick)
@@ -3114,7 +3114,7 @@ class App:
             cut = trim_archive(LOG_PATH, self.archive_days())
             if cut:
                 log.info("Chat archive: removed %d messages older than the keep setting", cut)
-        # an app left running still re-checks for updates every few hours (not just at startup)
+        # an app left running still checks once a day (not just at startup)
         if self.cfg.get("auto_update", True) and not DEMO and \
                 time.time() - float(self.cfg.get("update_check_last", 0) or 0) > UPDATE_CHECK_SECS:
             self.check_update()
@@ -5359,7 +5359,7 @@ or 911 if someone is in danger) and to the nearest FAA Flight Standards District
                                    else self.check_update(manual=True))).pack(side="left", padx=(10, 0))
         uprow.grid(row=24, column=1, sticky="w", padx=10, pady=2)
         auto_update = tk.BooleanVar(value=bool(self.cfg.get("auto_update", True)))
-        tk.Checkbutton(win, text="Check for updates automatically (at start-up and every 3 hours)", variable=auto_update, bg=BG,
+        tk.Checkbutton(win, text="Check for updates automatically (once a day)", variable=auto_update, bg=BG,
                        fg=FG, selectcolor=PANEL, activebackground=BG, activeforeground=FG,
                        font=("Segoe UI", 9)).grid(row=24, column=0, sticky="w", padx=10, pady=(26, 2))
 
