@@ -65,7 +65,7 @@ The short version is below. For every button, setting and how-to, see the
   satellite styles, with a tile engine that is easy on memory and data and sleeps when off-screen.
   A neat bar of controls sits **above the map**: toggles for internet nodes, aircraft, airspace and
   names, a dropdown to choose how far back to show nodes (active now, last hour, day, month, or
-  everything), **Fit all**, and **Clear history**. The internet nodes also follow wherever you pan,
+  everything) and **Fit all**. The internet nodes also follow wherever you pan,
   so you can explore other areas, not just home.
 - **Full screen** — a button up top, **F11** to toggle, **Esc** to come back, and an option to
   start in full screen every time.
@@ -180,6 +180,7 @@ how many other nodes it knows.
 |---|---|---|
 | Every node ever heard | Name, whether it's active now, first and last seen, how many packets, and the best signal. Kept for up to a year (5,000 nodes at most). | ✅ |
 | Click a node | Sets it as the message recipient, even if it isn't on the map. | 🧪 |
+| **Clear history…** (red button at the top of the tab) | Clears this list and the map, after asking first. It keeps your own node and any you've pinned with **Keep on clear** (★), and can also wipe the radio's own node memory so cleared nodes don't come straight back. A backup is saved as `nodes-history-backup.json`. | ✅ |
 
 ### Map tab
 
@@ -187,14 +188,13 @@ how many other nodes it knows.
 |---|---|---|
 | Pins | **Green**: active nodes. **Grey**: heard before, but not lately. **Purple**: nodes from the internet map (meshmap.net). **Amber outline**: repeaters and routers. **Hollow pin**: a node your radio heard that never sent a location. It's placed in a ring around you so you can still click it; it is *not* its real position. | ✅ |
 | Click a pin | Opens the node's **info card**: identity, hardware, location, signal and more, with **Copy location**, **Google Maps** and **Message** buttons. | ✅ |
-| Controls bar (above the map) | The toggles and buttons live in a tidy bar across the top of the map, rather than floating on top of it: **Fit all**, the time-range dropdown, **Clear history**, and the layer toggles **Internet / Aircraft / Airspace / Names**. | ✅ |
+| Controls bar (above the map) | The toggles and buttons live in a tidy bar across the top of the map, rather than floating on top of it: **Fit all**, the time-range dropdown, and the layer toggles **Internet / Aircraft / Airspace / Names**. | ✅ |
 | **Time range** dropdown | Choose what's on the map: *Nodes currently active* (no grey pins), *active in the last hour*, *…last day*, *…last month*, or *All recorded nodes*. Your choice is remembered. | ✅ |
 | **Internet** | Show or hide the purple nodes from meshmap.net. They're fetched every 10 minutes within the radius you set in Settings, and follow wherever you pan the map, so you can look at other areas too. | ✅ |
 | **Aircraft** | Planes and helicopters near you, drawn as little plane/helicopter icons pointing the way they're flying, labelled with callsign and altitude when you're zoomed in. Emergencies are red. Click one for its type, registration, speed, distance and, for airline flights, a **ROUTE** panel showing where it departs and arrives; there's a **Show on map** button to jump to it, or follow it on adsb.fi. Updates every 15 seconds while the map is on screen. | 🧪 |
 | **Airspace** | Outlines airport airspace (Class B, C, D and E surface areas, in blues and purple) and active temporary flight restrictions (red), US/FAA data. Click an outline for its name, altitudes and times. | 🧪 |
 | **Names** | Show or hide the text labels on every pin, to declutter a busy map. Names are still there on the pins' cards. | ✅ |
 | Red drone pins | Drones flying right now (heard in the last 3 minutes), so you can see them beside aircraft and nodes. Click one to jump to the Drone tab. | 🧪 |
-| **Clear history…** | Clears the History tab and the map, after asking first. It keeps your own node and any you've pinned with **Keep on clear** (★), and can also wipe the radio's own node memory so cleared nodes don't come straight back. A backup is saved as `nodes-history-backup.json`. | ✅ |
 | **Fit all** | Zooms to fit every pin. | ✅ |
 | **+ / − and the slider** | Zoom in and out. The scroll wheel works too. | ✅ |
 | Bottom bar: **All / Nodes / Repeaters**, **◀ ▶** | Step through the pins one by one, optionally only repeaters or only regular nodes. Click the name in the bar to open its card. | ✅ |

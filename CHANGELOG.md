@@ -1,5 +1,14 @@
 # Changelog
 
+## 0.6.2-beta — 2026-11-15
+
+A small one: the **Clear history** button is now where you'd actually look for it.
+
+- **Clear history… moved to the History tab.** It's a red button in a bar across the top of the tab,
+  above the list. It used to be tucked away on the Map tab's toolbar in dim grey, where it was easy to
+  miss. It works the same as before: it asks first, keeps your own node and any you've starred with
+  **Keep on clear**, and can also wipe the radio's own node memory.
+
 ## 0.6.1-beta — 2026-11-12
 
 First beta — a big usability + connectivity update, plus a new look. The headline: **the app updates
