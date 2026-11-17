@@ -184,7 +184,7 @@ how many other nodes it knows.
 |---|---|---|
 | Every node ever heard | Name, whether it's active now, first and last seen, how many packets, and the best signal. Kept for up to a year (5,000 nodes at most). | ✅ |
 | Click a node | Sets it as the message recipient, even if it isn't on the map. | 🧪 |
-| **Clear history…** (red button at the top of the tab) | Clears this list and the map, after asking first. It keeps your own node and any you've pinned with **Keep on clear** (★), and can also wipe the radio's own node memory so cleared nodes don't come straight back. A backup is saved as `nodes-history-backup.json`. | ✅ |
+| **Clear history…** (red button at the top of the tab) | Clears this list and the map, after asking first, whether or not a radio is connected. Nodes only come back once they're actually heard again. It keeps your own node and any you've pinned with **Keep on clear** (★), and can also wipe the radio's own node memory so cleared nodes don't come straight back. A backup is saved as `nodes-history-backup.json`. | ✅ |
 
 ### Map tab
 

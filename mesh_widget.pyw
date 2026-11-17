@@ -89,7 +89,7 @@ def asset_path(name):
     """Path to a bundled asset (icons), working from source and from a PyInstaller build."""
     base = getattr(sys, "_MEIPASS", HERE)
     return os.path.join(base, "assets", name)
-VERSION = "0.6.4-beta"
+VERSION = "0.6.5-beta"
 HEALTH_SECS = 600   # how often a health line (memory, CPU, nodes) goes into the log
 DEMO = False        # --demo: made-up nodes instead of a radio, with its own files (see enable_demo)
 log = logging.getLogger("centralfinitecurve")
@@ -2511,6 +2511,8 @@ class App:
         except OSError:
             log.warning("Couldn't back up the node history", exc_info=True)
         self.history = {k: v for k, v in self.history.items() if k in keep}
+        self.cfg["history_cleared_at"] = time.time()  # the radio's older sightings don't refill History
+        save_cfg(self.cfg)
         self.heard = {k: v for k, v in self.heard.items() if k in keep}  # don't rebuild from this session
         self.online = {}
         self.hist_dirty = True
@@ -2522,6 +2524,7 @@ class App:
                 self.markers.pop(nid).delete()
         if wipe_radio:
             self.reset_nodedb()
+        self.render_history()  # empty the list right away, radio or not
         if self.iface:
             self.refresh()
         else:
@@ -3537,6 +3540,7 @@ class App:
         now = time.time()
         window = max(1, int(self.cfg.get("active_mins", ACTIVE_MINS))) * 60
         keep_set = set(self.cfg.get("keep_on_clear") or [])  # location-test nodes, marked "★" and kept on clear
+        hist_cleared = float(self.cfg.get("history_cleared_at", 0) or 0)
         others = []  # (last heard, id, name, node) for every node except us
         me_node = None
         for nid, n in nodes.items():
@@ -3554,7 +3558,9 @@ class App:
             others.append((last, nid, name, n))
             # keep the saved history in step with what the radio knows (names, older sightings)
             h = self.history.get(nid)
-            if h is None and last:
+            # After "Clear history…", the radio's node DB still lists everything it ever heard; only
+            # let a node back into History once it's actually heard AFTER the clear.
+            if h is None and last and last > hist_cleared:
                 h = self.history[nid] = {"first": last, "last": last, "count": 0}
                 self.hist_dirty = True
             if h is not None:
@@ -3595,7 +3601,20 @@ class App:
         self.sync_tree(self.tree, rows)
         active = len(rows)  # our own node counts as active while connected
 
-        # History tab: every node we've ever picked up
+        self.tabs.tab(0, text=f"Active ({active})")
+        self.render_history(now, window)
+        self.update_map(my_id, pos, now, window)
+
+        self.radio_nodes = [(nid, name) for _, nid, name, _ in others]
+        self.sync_dest()
+
+    def render_history(self, now=None, window=None):
+        """Redraw the History tab from self.history. Works with or without a radio connected
+        (Clear history… must empty the list even when nothing is connected)."""
+        now = now or time.time()
+        if window is None:
+            window = max(1, int(self.cfg.get("active_mins", ACTIVE_MINS))) * 60
+        keep_set = set(self.cfg.get("keep_on_clear") or [])
         fmt = lambda t: datetime.datetime.fromtimestamp(t).strftime("%m/%d %H:%M") if t else "-"
         rows = []
         for nid, h in sorted(self.history.items(), key=lambda kv: kv[1].get("last", 0), reverse=True):
@@ -3607,12 +3626,7 @@ class App:
                 h.get("count", 0) or "-",
                 h.get("best_rssi", "-"))))
         self.sync_tree(self.hist_tree, rows)
-        self.tabs.tab(0, text=f"Active ({active})")
         self.tabs.tab(1, text=f"History ({len(self.history)})")
-        self.update_map(my_id, pos, now, window)
-
-        self.radio_nodes = [(nid, name) for _, nid, name, _ in others]
-        self.sync_dest()
 
     def sync_dest(self):
         """Message-to list: every node our radio knows (newest first), then every other node pinned on the
