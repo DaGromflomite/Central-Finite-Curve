@@ -16,6 +16,9 @@ date — once it's installed, it can check for new versions and install them for
 > treat the macOS build as an untested, pre-alpha backup. There's no prebuilt macOS app yet.
 >
 > Central Finite Curve is free and open source under the GPL-3.0, and it is never for sale.
+>
+> Designed, directed and tested by DaGromflomite on real Meshtastic radios. The code is written
+> with AI assistance (Claude). See [CREDITS](CREDITS.md#how-it-was-made).
 
 ---
 
