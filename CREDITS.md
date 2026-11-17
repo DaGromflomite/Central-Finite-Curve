@@ -3,6 +3,14 @@
 Central Finite Curve is an original project by **DaGromflomite**, released under **GPL-3.0-or-later**.
 It stands on a lot of other people's good work. Thank you to all of the below.
 
+## How it was made
+
+DaGromflomite designed Central Finite Curve, decided what it does and how it behaves, and tests
+every release on real Meshtastic radios on a live mesh. The bugs found in that use, and the fixes
+for them, are directed by DaGromflomite. The code itself is written with AI assistance
+(Anthropic's [Claude](https://claude.com/claude-code)). Commits made that way are marked
+`Co-Authored-By: Claude` in the history.
+
 ## Core dependency (sets the license)
 
 - **[Meshtastic](https://meshtastic.org/) / [Meshtastic-python](https://github.com/meshtastic/python)** — GPL-3.0.
