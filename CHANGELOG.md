@@ -1,5 +1,13 @@
 # Changelog
 
+## 0.6.5-beta — 2026-11-16
+
+- **Fixed: Clear history now actually clears the History tab.** Before, it cleared the map, but the
+  History list filled straight back up with every node your radio still remembered. Now a node only
+  comes back once it's actually heard again after you clear.
+- **Fixed: Clear history works with no radio connected.** The list on screen was only redrawn when
+  the radio sent an update, so with nothing connected the old nodes stayed visible after clearing.
+
 ## 0.6.4-beta — 2026-11-15
 
 - **Update checks are once a day again.** 0.6.3 checked at every start and every 3 hours, which

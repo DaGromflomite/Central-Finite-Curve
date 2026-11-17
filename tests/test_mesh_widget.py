@@ -827,7 +827,32 @@ class Gui(unittest.TestCase):
                 mw.messagebox.askyesno = real_ask
             root.update()
             r["history_cleared"] = "!01d0ffee" not in app.history and "!01d0ffee" not in app.map_points
-            r["radio_nodes_back"] = len(app.history) > 0
+            # the radio's node DB still lists everyone; a sync must NOT refill the History tab with them
+            app.refresh()
+            root.update()
+            kept = set(app.kept_ids())
+            r["hist_stays_clear"] = set(app.history) <= kept and                 len(app.hist_tree.get_children()) == len(app.history)
+            # ...but a node genuinely heard after the clear does come back
+            app.heard["!0b0b0b0b"] = (time.time() + 1, 5.0)
+            app.iface.nodes["!0b0b0b0b"] = {"num": 0x0b0b0b0b, "user": {"id": "!0b0b0b0b", "longName": "Heard Again"},
+                                           "lastHeard": int(time.time()) + 1}
+            app.refresh()
+            root.update()
+            r["new_hearing_back"] = "!0b0b0b0b" in app.history
+            del app.iface.nodes["!0b0b0b0b"]
+            # Clear history with NO radio connected must still empty the History list on screen
+            app.history["!0c0c0c0c"] = {"first": now - 9e5, "last": now - 8e5, "count": 2, "name": "Offline Old"}
+            app.render_history()
+            real_iface, app.iface = app.iface, None
+            mw.messagebox.askyesno = lambda *a, **k: True
+            try:
+                app.clear_map_history()
+            finally:
+                mw.messagebox.askyesno = real_ask
+                app.iface = real_iface
+            root.update()
+            r["offline_clear"] = ("!0c0c0c0c" not in app.hist_tree.get_children()
+                                  and len(app.hist_tree.get_children()) == len(app.history))
             # three message panels; each pops out into a window with its own send controls
             alert = ("Drone: 60:60:1f:00:00:01 RSSI:-71 https://maps.google.com/?q=41.95,-79.97\r\n"
                      "Pilot: https://maps.google.com/?q=41.94,-79.98\r\n")
@@ -1081,7 +1106,9 @@ class Gui(unittest.TestCase):
         self.assertIn("public all", texts)
         self.assertIn("private all", texts)
         self.assertEqual(sum(1 for t, d in r["pushed"] if d), 3, "every drone alert should push, in every mode")
-        self.assertTrue(r["radio_nodes_back"], "nodes the radio still knows didn't come back after clearing")
+        self.assertTrue(r["hist_stays_clear"], "Clear history: the radio's old nodes refilled the History tab")
+        self.assertTrue(r["new_hearing_back"], "a node heard after Clear history didn't show up in History")
+        self.assertTrue(r["offline_clear"], "Clear history with no radio left nodes in the History list")
         self.assertTrue(r.get("card_shows_sent"), "a message sent from the card didn't show on it")
         self.assertTrue(r["chat_cleared"], "closing the card left its chat hooked up")
         self.assertTrue(r["now_hides_old"] and r["day_hides_old"], "map Show filter kept old pins")
