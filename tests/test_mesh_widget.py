@@ -711,6 +711,53 @@ class Gui(unittest.TestCase):
         self.assertEqual(logged, [], "errors were logged: " + "; ".join(r.getMessage() for r in logged))
         return results
 
+    def test_map_resize_grip(self):
+        """Dragging the corner grip resizes the map box, clamps to the window, snaps to full width,
+        persists in cfg map_size, and double-click resets to automatic."""
+        E = types.SimpleNamespace
+
+        def drag(dx, dy):
+            def step(app, root, r):
+                g = app.size_grip
+                x, y = g.winfo_rootx(), g.winfo_rooty()
+                app.grip_press(E(x_root=x, y_root=y))
+                app.grip_drag(E(x_root=x + dx, y_root=y + dy))
+                app.grip_release(E(x_root=x + dx, y_root=y + dy))
+            return step
+
+        def measure(key):
+            def step(app, root, r):
+                root.update_idletasks()
+                r[key] = (app.tabs_box.winfo_width(), app.tabs_box.winfo_height(), app.cfg.get("map_size"),
+                          app.map.winfo_height(), root.winfo_width(), root.winfo_height())
+            return step
+
+        def reset(app, root, r):
+            app.grip_reset()
+
+        r = self.run_app([
+            (2, lambda app, root, r: app.tabs.select(app.map_tab)), (0.5, measure("start")),
+            (0.5, drag(-300, 120)), (0.5, measure("smaller_wider_taller")),
+            (0.5, drag(5000, 5000)), (0.5, measure("max")),
+            (0.5, drag(-5000, -5000)), (0.5, measure("min")),
+            (0.5, reset), (0.5, measure("reset")),
+        ])
+        sw, sh, scfg, _, rw, rh = r["start"]
+        self.assertIsNone(scfg)
+        w, h, cfg, maph, _, _ = r["smaller_wider_taller"]
+        self.assertTrue(abs(w - (sw - 300)) <= 2, (sw, w))
+        self.assertTrue(abs(h - (sh + 120)) <= 2, (sh, h))
+        self.assertEqual(cfg, [w, h])
+        self.assertGreater(maph, 100)  # the map itself grew/shrank with the box
+        w, h, cfg, _, rw, rh = r["max"]
+        self.assertEqual(cfg[0], 0)  # snapped to full width
+        self.assertLessEqual(h, rh - mw.App.MSG_MIN_H - 60)  # messages still have room
+        w, h, cfg, _, _, _ = r["min"]
+        self.assertEqual((w, h), (mw.App.MAP_MIN_W, mw.App.MAP_MIN_H))
+        w, h, cfg, _, _, _ = r["reset"]
+        self.assertIsNone(cfg)
+        self.assertEqual((w, h), (sw, sh))
+
     def test_demo_session(self):
         def open_map(app, root, r):
             app.tabs.select(app.map_tab)

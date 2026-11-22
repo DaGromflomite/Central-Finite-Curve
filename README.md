@@ -205,6 +205,7 @@ how many other nodes it knows.
 | **Fit all** | Zooms to fit every pin. | ✅ |
 | **+ / − and the slider** | Zoom in and out. The scroll wheel works too. | ✅ |
 | Bottom bar: **All / Nodes / Repeaters**, **◀ ▶** | Step through the pins one by one, optionally only repeaters or only regular nodes. Click the name in the bar to open its card. | ✅ |
+| **◢ Resize grip** (bottom-right corner of the map) | Drag it to make the map taller, shorter, wider or narrower. The message panels below use whatever space is left. Drag it all the way right for full width; double-click it to go back to the normal size. Your size is remembered. | ✅ |
 
 ⚠️ **About positions:** a pin is only as accurate as the location that node sends. Many nodes send a
 blurred position on purpose (you'll see a faint circle around them), some send none at all (hollow

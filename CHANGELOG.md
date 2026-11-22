@@ -1,5 +1,19 @@
 # Changelog
 
+## 0.6.6-beta — 2026-11-22
+
+- **New: resize the map by dragging its corner.** A small ◢ grip sits at the bottom-right corner of
+  the map area. Drag it to make the map taller, shorter, wider or narrower; the message panels take
+  whatever space is left. Drag it all the way right for full width, or double-click it to reset.
+  Your size is remembered between launches.
+- **Fixed: internet nodes vanished for up to 10 minutes after Clear history.** Clearing history also
+  cleared the purple internet nodes, and they only came back on the next 10-minute refresh. They're
+  now fetched again straight away.
+- **Fixed: a radio that stops answering could lock up its USB port.** If the radio didn't respond
+  when connecting, the port could stay held so retries failed and Quit hung. Failed connections now
+  always let go of the port, Quit never waits on a stuck radio, and the status names the port
+  actually being tried.
+
 ## 0.6.5-beta — 2026-11-16
 
 - **Fixed: Clear history now actually clears the History tab.** Before, it cleared the map, but the

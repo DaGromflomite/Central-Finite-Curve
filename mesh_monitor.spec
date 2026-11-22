@@ -11,8 +11,15 @@ hiddenimports = collect_submodules("google.protobuf")
 app_icon = ("assets/CentralFiniteCurve.ico" if sys.platform == "win32"
             else "assets/CentralFiniteCurve.icns" if sys.platform == "darwin" else None)
 
-# meshtastic & friends load submodules/protobufs dynamically — pull them all in.
-for pkg in ("meshtastic", "tkintermapview", "pypubsub", "pubsub", "serial", "soundfile", "sounddevice"):
+# Every runtime dependency, pulled in EXPLICITLY so a fresh download has all of it and
+# nothing relies on PyInstaller's auto-analysis (which missed bleak/requests/urllib3 before
+# — the Bluetooth-connect and map-tile features broke in the installer without them).
+# meshtastic & friends also load submodules/protobufs dynamically, which collect_all covers.
+for pkg in ("meshtastic", "tkintermapview", "pypubsub", "pubsub", "serial",
+            "soundfile", "sounddevice", "numpy",
+            "requests", "urllib3", "idna", "certifi", "charset_normalizer",  # map tiles / HTTP
+            "bleak",                                                          # Bluetooth connect
+            "pystray", "PIL"):
     try:
         d, b, h = collect_all(pkg)
         datas += d; binaries += b; hiddenimports += h

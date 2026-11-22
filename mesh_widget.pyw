@@ -89,7 +89,7 @@ def asset_path(name):
     """Path to a bundled asset (icons), working from source and from a PyInstaller build."""
     base = getattr(sys, "_MEIPASS", HERE)
     return os.path.join(base, "assets", name)
-VERSION = "0.6.5-beta"
+VERSION = "0.6.6-beta"
 HEALTH_SECS = 600   # how often a health line (memory, CPU, nodes) goes into the log
 DEMO = False        # --demo: made-up nodes instead of a radio, with its own files (see enable_demo)
 log = logging.getLogger("centralfinitecurve")
@@ -97,7 +97,7 @@ DEFAULTS = {"mode": "serial", "port": "COM16", "host": "", "on_top": False,
             "sound": True, "geometry": "440x680",
             # window: full-screen is OFF by default; "fullscreen_on_start" makes it
             # permanent (the app goes full screen every launch until you untick it).
-            "fullscreen": False, "fullscreen_on_start": False,
+            "fullscreen": False, "fullscreen_on_start": False, "map_size": None,
             "ble_address": ""}  # last Bluetooth radio chosen (mode == "ble")
 RETRY_SECS = 10
 ACTIVE_MINS = 180  # a quiet node only announces itself every ~3 h, so a shorter window hides working nodes
@@ -1896,8 +1896,23 @@ class App:
                         font=("Segoe UI", 9))
         style.map("TNotebook.Tab", background=[("selected", PANEL)], foreground=[("selected", ACCENT)],
                   expand=[("selected", (0, 0, 0, 0))])
-        self.tabs = ttk.Notebook(self.root)
-        self.tabs.pack(fill="both", expand=False, padx=8, pady=(8, 0))
+        # The tab area (map etc.) sits in a box the user can resize by dragging its bottom-right corner
+        # grip; the message panels below take whatever is left. Sizes persist in cfg map_size; until
+        # the user drags, the box keeps its natural size (geometry propagation on).
+        self.tabs_box = tk.Frame(self.root, bg=BG)
+        self.tabs = ttk.Notebook(self.tabs_box)
+        self.tabs.pack(fill="both", expand=True)
+        self.apply_map_size()
+        self.size_grip = tk.Label(self.root, text="◢", bg=BG, fg=DIM, cursor="size_nw_se",
+                                  font=("Segoe UI", 10), bd=0, padx=0, pady=0)
+        self.size_grip.place(in_=self.tabs_box, relx=1.0, rely=1.0, anchor="se")
+        self.size_grip.lift()
+        self.size_grip.bind("<ButtonPress-1>", self.grip_press)
+        self.size_grip.bind("<B1-Motion>", self.grip_drag)
+        self.size_grip.bind("<ButtonRelease-1>", self.grip_release)
+        self.size_grip.bind("<Double-Button-1>", self.grip_reset)
+        self.size_grip.bind("<Enter>", lambda e: self.size_grip.config(fg=ACCENT))
+        self.size_grip.bind("<Leave>", lambda e: self.size_grip.config(fg=DIM))
 
         def make_tree(cols, labels, widths):
             frame = tk.Frame(self.tabs, bg=PANEL)
@@ -2420,6 +2435,62 @@ class App:
             self.root.after_cancel(self.geo_job)
         self.geo_job = self.root.after(1500, self.save_geometry)
 
+    # ---------- resizable map area (drag the corner grip) ----------
+    MAP_MIN_W, MAP_MIN_H = 320, 220   # smallest map box
+    MSG_MIN_H = 140                   # always leave this much room for messages + send bar
+
+    def map_size_limits(self):
+        """(max width, max height) the map box may take inside the current window."""
+        self.root.update_idletasks()
+        max_w = max(self.MAP_MIN_W, self.root.winfo_width() - 16)
+        max_h = max(self.MAP_MIN_H, self.root.winfo_height() - self.MSG_MIN_H - 60)
+        return max_w, max_h
+
+    def apply_map_size(self):
+        """Pack the tab box at the user's chosen size, or its natural size if never chosen.
+        A width of 0 (or None) means 'full window width'."""
+        size = self.cfg.get("map_size")
+        opts = dict(padx=8, pady=(8, 0))  # re-packing a packed widget keeps its place in the stack
+        if not size:
+            self.tabs_box.pack_propagate(True)
+            self.tabs_box.configure(width=0, height=0)
+            self.tabs_box.pack(fill="x", expand=False, **opts)
+            return
+        w, h = size
+        self.tabs_box.pack_propagate(False)
+        self.tabs_box.configure(height=int(h), width=int(w or 1))
+        if w:
+            self.tabs_box.pack(fill="none", anchor="w", expand=False, **opts)
+        else:
+            self.tabs_box.pack(fill="x", expand=False, **opts)
+
+    def grip_press(self, e):
+        self._grip = (e.x_root, e.y_root, self.tabs_box.winfo_width(), self.tabs_box.winfo_height(),
+                      self.map_size_limits())
+
+    def grip_drag(self, e):
+        if not getattr(self, "_grip", None):
+            return
+        x0, y0, w0, h0, (max_w, max_h) = self._grip
+        w = min(max(w0 + e.x_root - x0, self.MAP_MIN_W), max_w)
+        h = min(max(h0 + e.y_root - y0, self.MAP_MIN_H), max_h)
+        full = w >= max_w - 6  # dragged (nearly) to the right edge: snap to full width
+        self.cfg["map_size"] = [0 if full else int(w), int(h)]
+        self.apply_map_size()
+
+    def grip_release(self, e):
+        if getattr(self, "_grip", None):
+            self._grip = None
+            save_cfg(self.cfg)
+            log.info("Map area resized to %s", self.cfg.get("map_size"))
+
+    def grip_reset(self, e=None):
+        self._grip = None
+        self.cfg["map_size"] = None
+        save_cfg(self.cfg)
+        self.apply_map_size()
+        log.info("Map area size reset to automatic")
+
     def save_geometry(self):
         self.geo_job = None
         geo = self.root.geometry()
@@ -2515,6 +2586,7 @@ class App:
         save_cfg(self.cfg)
         self.heard = {k: v for k, v in self.heard.items() if k in keep}  # don't rebuild from this session
         self.online = {}
+        self.online_last = 0  # internet nodes aren't history: re-fetch them now, not 10 min later
         self.hist_dirty = True
         save_json(HIST_PATH, self.history)
         log.info("History cleared by the user (kept %d node(s)); radio reset=%s", len(keep), wipe_radio)
@@ -2935,7 +3007,24 @@ class App:
                 else:
                     port = None if self.cfg["port"].lower() == "auto" else self.cfg["port"]
                     port, moved = self.find_port(port)
-                    iface = meshtastic.serial_interface.SerialInterface(devPath=port)
+                    # Show the port we're actually trying — after a fallback it can differ from
+                    # the configured one, so a failure should name the real port, not the stale config.
+                    if port:
+                        self.port_used = port
+                    # connectNow=False so WE hold the interface object before the blocking handshake.
+                    # If the handshake times out (a wedged or just-renumbered radio), ALWAYS close it:
+                    # otherwise meshtastic leaves its reader thread holding the serial port open, which
+                    # locks out every retry AND hangs quit (the port is never released). This was the bug.
+                    iface = meshtastic.serial_interface.SerialInterface(devPath=port, connectNow=False)
+                    try:
+                        iface.connect()
+                    except Exception:
+                        try:
+                            iface.close()
+                        except Exception:
+                            pass
+                        self.port_used = None
+                        raise
                     self.port_used = iface.devPath  # "auto" resolves to a real port inside the library
                     wrong = self.check_radio(iface, iface.devPath, moved)
                     if wrong:
@@ -5399,19 +5488,40 @@ or 911 if someone is in danger) and to the nearest FAA Flight Standards District
         self.save_geometry()
         save_json(HIST_PATH, self.history)
         if self.tray:
-            self.tray.stop()
-        if self.iface:
             try:
-                self.iface.close()
+                self.tray.stop()
             except Exception:
-                log.debug("Closing the radio connection failed", exc_info=True)
+                pass
+        # Close the radio in the BACKGROUND, not inline: a wedged or just-renumbered radio can
+        # make close() block, which used to hang Quit with the serial port still held (the app
+        # lingered as a zombie holding the COM port). Never wait on it here.
+        iface, self.iface = self.iface, None
+        if iface:
+            def _close():
+                try:
+                    iface.close()
+                except Exception:
+                    log.debug("Closing the radio connection failed", exc_info=True)
+            threading.Thread(target=_close, daemon=True).start()
         log.info("Quit")
         try:  # cancel timers so none fire into a destroyed window
             for job in self.root.tk.splitlist(self.root.tk.call("after", "info")):
                 self.root.tk.call("after", "cancel", job)  # not after_cancel(): it errors on the map's timers
         except tk.TclError:
             pass
-        self.root.destroy()
+        try:
+            self.root.destroy()
+        except Exception:
+            pass
+        # Hard safety net (real app only, never under tests): if a lingering (meshtastic reader)
+        # thread would otherwise keep the process alive holding the serial port, force the process
+        # to exit a few seconds after Quit. On a clean exit the interpreter is already gone before
+        # this fires. Guarded by _standalone so a test calling quit() can't kill the test runner.
+        if getattr(self, "_standalone", False):
+            def _force_exit():
+                time.sleep(3)
+                os._exit(0)
+            threading.Thread(target=_force_exit, daemon=True).start()
 
 
 if __name__ == "__main__":
@@ -5426,6 +5536,7 @@ if __name__ == "__main__":
     root = tk.Tk()
     root.report_callback_exception = lambda *exc: log.error("UI callback failed", exc_info=exc)
     app = App(root)
+    app._standalone = True  # arm quit()'s force-exit safety net only for the real running app
     # Safety net: if the app exits by any path that isn't the clean Quit (e.g. an
     # unhandled error escaping the loop), still close the radio so the serial port
     # is released. Does NOT cover a Task-Manager/force kill — nothing can.
