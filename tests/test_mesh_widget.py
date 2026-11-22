@@ -102,6 +102,18 @@ class Helpers(unittest.TestCase):
         mb = mw.memory_mb()
         self.assertTrue(mb is None or 5 < mb < 4000)
 
+    def test_update_script(self):
+        """The updater's batch file must hold plain quotes (cmd chokes on backslash-escaped ones,
+        the 0.6.3-0.6.6 'Windows cannot find' bug). The real install is tested end-to-end by hand."""
+        folder = tempfile.mkdtemp(prefix="cfc-upd-")
+        setup = os.path.join(folder, "Setup with spaces.exe")
+        exe = os.path.join(folder, "Program Files", "Central Finite Curve", "CentralFiniteCurve.exe")
+        bat = mw.write_update_script(setup, exe, folder=folder)
+        text = open(bat, encoding="mbcs" if os.name == "nt" else "utf-8").read()
+        self.assertNotIn('\\"', text)
+        self.assertIn(f'start "" /wait "{setup}" /VERYSILENT', text)
+        self.assertIn(f'start "" "{exe}"', text)
+
     def test_version_newer(self):
         # higher core version wins, with or without a v-prefix
         self.assertTrue(mw.version_newer("v0.6.0-alpha", "0.5.0-alpha"))

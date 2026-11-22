@@ -1,5 +1,14 @@
 # Changelog
 
+## 0.6.7-beta — 2026-11-22
+
+- **Fixed: clicking "Yes" to install an update showed a "Windows cannot find" error and nothing
+  installed.** This affected the automatic updater in 0.6.3 to 0.6.6. Updates now install in the
+  background and the app reopens by itself. If you're on one of those versions, download this
+  installer by hand once; from then on updates install themselves.
+- Updates now install fully hidden (no installer window), then the app reopens where it was.
+- Fixed a harmless error logged when the radio connected just as the app was quitting.
+
 ## 0.6.6-beta — 2026-11-22
 
 - **New: resize the map by dragging its corner.** A small ◢ grip sits at the bottom-right corner of

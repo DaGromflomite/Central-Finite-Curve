@@ -89,7 +89,7 @@ def asset_path(name):
     """Path to a bundled asset (icons), working from source and from a PyInstaller build."""
     base = getattr(sys, "_MEIPASS", HERE)
     return os.path.join(base, "assets", name)
-VERSION = "0.6.6-beta"
+VERSION = "0.6.7-beta"
 HEALTH_SECS = 600   # how often a health line (memory, CPU, nodes) goes into the log
 DEMO = False        # --demo: made-up nodes instead of a radio, with its own files (see enable_demo)
 log = logging.getLogger("centralfinitecurve")
@@ -771,6 +771,29 @@ DISK_CACHE_DAYS = 30      # then re-fetched, so map changes still come through
 REPO_URL = "https://github.com/DaGromflomite/Central-Finite-Curve"
 UPDATE_API = "https://api.github.com/repos/DaGromflomite/Central-Finite-Curve/releases"
 UPDATE_CHECK_SECS = 24 * 3600  # check GitHub for a newer release at most once a day
+
+
+def write_update_script(setup, exe, folder=None):
+    """Write the little batch file that installs an update and reopens the app; returns its path.
+    A batch file, NOT `cmd /c "<command>"`: Python escapes the quotes inside such a command with
+    backslashes, which cmd doesn't understand, so `start "" ...` reached cmd mangled and Windows said
+    it "cannot find" a file named backslash (the updater in 0.6.3-0.6.6 never ran the installer)."""
+    bat = os.path.join(folder or tempfile.gettempdir(), "CentralFiniteCurve-update.cmd")
+    lines = ["@echo off",
+             f'start "" /wait "{setup}" /VERYSILENT /SUPPRESSMSGBOXES /NORESTART /CLOSEAPPLICATIONS',
+             f'start "" "{exe}"',
+             '(goto) 2>nul & del "%~f0"']  # tidy up: the script deletes itself when done
+    with open(bat, "w", encoding="mbcs" if os.name == "nt" else "utf-8", newline="\r\n") as f:
+        f.write("\n".join(lines) + "\n")
+    return bat
+
+
+def launch_installer(setup, exe):
+    """Run the update script detached (no console window), so it outlives the app quitting."""
+    bat = write_update_script(setup, exe)
+    subprocess.Popen(["cmd", "/c", bat], close_fds=True,
+                     creationflags=0x00000008 | 0x00000200 | 0x08000000)  # DETACHED, NEW_GROUP, NO_WINDOW
+    return bat
 
 
 def version_newer(remote, local):
@@ -3185,11 +3208,7 @@ class App:
         A detached cmd waits for the installer to finish and starts the new exe, because
         Inno skips its own "launch" step in silent mode."""
         try:
-            exe = sys.executable  # the installed CentralFiniteCurve.exe
-            cmd = (f'start "" /wait "{path}" /SILENT /SUPPRESSMSGBOXES /NORESTART /CLOSEAPPLICATIONS '
-                   f'& start "" "{exe}"')
-            subprocess.Popen(["cmd", "/c", cmd], creationflags=0x00000008 | 0x00000200,  # DETACHED, NEW_GROUP
-                             close_fds=True)
+            launch_installer(path, sys.executable)  # sys.executable = the installed CentralFiniteCurve.exe
         except Exception:
             log.warning("Couldn't launch the installer quietly; opening it normally", exc_info=True)
             try:
@@ -3264,6 +3283,8 @@ class App:
         self.q.put(("packet", (packet, interface)))
 
     def pump(self):
+        if getattr(self, "quitting", False):
+            return  # the window is gone: a late "connected" etc. must not touch dead widgets
         try:
             while True:
                 kind, data = self.q.get_nowait()
@@ -5485,6 +5506,7 @@ or 911 if someone is in danger) and to the nearest FAA Flight Standards District
         win.protocol("WM_DELETE_WINDOW", apply)  # closing with X keeps changes too
 
     def quit(self):
+        self.quitting = True  # stops pump() touching widgets that are about to go
         self.save_geometry()
         save_json(HIST_PATH, self.history)
         if self.tray:
