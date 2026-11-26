@@ -1,5 +1,15 @@
 # Changelog
 
+## 0.6.8-beta — 2026-11-26
+
+- **Fixed: nodes with no location were drawn miles away from you.** Nodes that never send a
+  location get a hollow pin near you. That pin was placed a fixed number of screen pixels away, so
+  zoomed out it ended up several miles off. It now always stays within about 150 m of you.
+- **New: estimate your location from your internet connection when your node has no GPS.** The
+  first time it's needed, the app asks first. Say yes and your node is placed at a rough location
+  from your internet provider (town level, can be a few miles off). Say no and nothing is sent.
+  Turn it on or off any time in Settings ▸ Home location. A location you type there always wins.
+
 ## 0.6.7-beta — 2026-11-22
 
 - **Fixed: clicking "Yes" to install an update showed a "Windows cannot find" error and nothing

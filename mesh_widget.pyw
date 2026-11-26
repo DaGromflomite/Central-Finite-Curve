@@ -18,6 +18,7 @@ import random
 import re
 import sys
 import urllib.error
+import urllib.parse
 import urllib.request
 import webbrowser
 import os
@@ -89,7 +90,7 @@ def asset_path(name):
     """Path to a bundled asset (icons), working from source and from a PyInstaller build."""
     base = getattr(sys, "_MEIPASS", HERE)
     return os.path.join(base, "assets", name)
-VERSION = "0.6.7-beta"
+VERSION = "0.6.8-beta"
 HEALTH_SECS = 600   # how often a health line (memory, CPU, nodes) goes into the log
 DEMO = False        # --demo: made-up nodes instead of a radio, with its own files (see enable_demo)
 log = logging.getLogger("centralfinitecurve")
@@ -100,6 +101,7 @@ DEFAULTS = {"mode": "serial", "port": "COM16", "host": "", "on_top": False,
             "fullscreen": False, "fullscreen_on_start": False, "map_size": None,
             "ble_address": ""}  # last Bluetooth radio chosen (mode == "ble")
 RETRY_SECS = 10
+RING_MAX_M = 150  # no-location pins sit at most this far from us (they were heard nearby)
 ACTIVE_MINS = 180  # a quiet node only announces itself every ~3 h, so a shorter window hides working nodes
 PUSH_GAP = 30  # seconds between phone pushes; alerts in between are merged into the next one
 # Settings -> Phone alerts -> "Send to phone": which incoming messages are pushed
@@ -261,6 +263,32 @@ def circle(lat, lon, radius_m, points=28):
     dlon = radius_m / (111320 * max(math.cos(math.radians(lat)), 0.01))
     return [(lat + dlat * math.sin(2 * math.pi * i / points), lon + dlon * math.cos(2 * math.pi * i / points))
             for i in range(points)]
+
+
+# Approximate location from this PC's public IP. Only ever called after the user says yes (cfg ip_location).
+IP_GEO_URLS = ("https://ipinfo.io/json", "https://ipapi.co/json/")
+IP_GEO_ACC_M = 8000  # IP geolocation is roughly town/city level
+
+
+def ip_geolocate():
+    """(lat, lon, service host) for this PC's internet connection. Raises if every service fails."""
+    err = None
+    for url in IP_GEO_URLS:
+        try:
+            req = urllib.request.Request(url, headers={"User-Agent": "CentralFiniteCurve/1.0",
+                                                       "Accept": "application/json"})
+            with urllib.request.urlopen(req, timeout=10) as r:
+                d = json.loads(r.read(65536))
+            if isinstance(d.get("loc"), str):  # ipinfo.io: "lat,lon"
+                lat, lon = (float(x) for x in d["loc"].split(","))
+            else:                              # ipapi.co
+                lat, lon = float(d["latitude"]), float(d["longitude"])
+            if real_pos({"latitude": lat, "longitude": lon}):
+                return lat, lon, urllib.parse.urlsplit(url).hostname
+            err = ValueError(f"{url}: no usable location")
+        except Exception as e:  # try the next service
+            err = e
+    raise err or ValueError("no IP location service answered")
 
 
 def fetch_online(center, radius_km):
@@ -3640,6 +3668,7 @@ class App:
                 gps += f" · {pos['satsInView']} sats"
         else:
             gps = "GPS: no fix yet"
+            self.maybe_ip_location(me.get("user", {}).get("longName"))
         util = dm.get("channelUtilization")
         self.status.config(text=f"{me.get('user', {}).get('longName', 'Connected')}"
                                 f" ({me.get('user', {}).get('shortName', '')})")
@@ -3820,7 +3849,9 @@ class App:
             points[my_id] = (my_pos["latitude"], my_pos["longitude"], "Me", ACCENT, False, now)
         elif my_id and home:
             # our node has no GPS (or keeps it private): show it at the home location, which never leaves this PC
-            points[my_id] = (*home, "Me (home)", ACCENT, False, now)
+            label = "Me (approx. location from internet provider)" if self.cfg.get("home_source") == "ip" \
+                else "Me (home)"
+            points[my_id] = (*home, label, ACCENT, False, now)
         anchor = points[my_id][:2] if my_id in points else home
         # nodes heard by radio that never sent a location still go on the map: a hollow pin in a ring
         # around us, so every node shows up the moment it's heard
@@ -3851,9 +3882,10 @@ class App:
             elif anchor:
                 ring.append((nid, label, DIM, False, 0))
         if ring:
-            # ~70 px from the anchor whatever the zoom, so the ring stays readable when zooming
+            # ~70 px from the anchor so close-up pins don't overlap, but never more than RING_MAX_M away:
+            # zoomed out, 70 px is many miles and put no-GPS nodes miles from where they really are
             mpp = 156543.03 * math.cos(math.radians(anchor[0])) / 2 ** round(self.map.zoom)
-            spots = circle(anchor[0], anchor[1], 70 * mpp, points=max(len(ring), 4))
+            spots = circle(anchor[0], anchor[1], min(70 * mpp, RING_MAX_M), points=max(len(ring), 4))
             for i, (nid, label, color, rep, last) in enumerate(sorted(ring)):
                 lat, lon = spots[i if len(ring) >= 4 else i + 1]  # a lone pin sits above the anchor
                 points[nid] = (lat, lon, label, color, rep, last)
@@ -4680,6 +4712,62 @@ class App:
             return None
         return (lat, lon) if -90 <= lat <= 90 and -180 <= lon <= 180 else None
 
+    def maybe_ip_location(self, my_name=None):
+        """Our node has no GPS. Once per run: if the user agreed, estimate home from the PC's internet
+        connection; if they've never been asked, ask. A location typed in Settings always wins."""
+        if DEMO or getattr(self, "_ip_loc_checked", False):
+            return
+        self._ip_loc_checked = True
+        choice = self.cfg.get("ip_location")
+        if self.cfg.get("home_source") == "manual" or choice == "no":
+            return
+        if choice == "yes":
+            self.fetch_ip_location()
+            return
+        self.root.after(300, lambda: self.ask_ip_location(my_name))
+
+    def ask_ip_location(self, my_name=None):
+        had = self.home()
+        ok = messagebox.askyesno(
+            "Where is your node?",
+            f"{my_name or 'Your node'} has no GPS, so the map doesn't know where it is.\n\n"
+            "Estimate its location from this PC's internet connection (IP address)?\n\n"
+            "• Accuracy is roughly town/city level, so it can be a few miles off.\n"
+            "• It sends one request to ipinfo.io, which sees your public IP address like any website "
+            "does. Nothing is sent over the mesh.\n"
+            + ("• It replaces the home location saved in Settings.\n" if had else "")
+            + "\nYou can change this, or type an exact location, any time in Settings ▸ Home location.",
+            parent=self.root)
+        self.cfg["ip_location"] = "yes" if ok else "no"
+        save_cfg(self.cfg)
+        log.info("IP location: user %s", "allowed it" if ok else "declined")
+        if ok:
+            self.fetch_ip_location()
+
+    def fetch_ip_location(self):
+        def work():
+            try:
+                lat, lon, src = ip_geolocate()
+            except Exception:
+                warn_once("iploc", "Couldn't estimate location from the internet connection", exc_info=True)
+                return
+            log.info("IP location: got an estimate from %s", src)  # the coordinates stay out of the log
+
+            def apply():
+                if self.cfg.get("home_source") == "manual" or self.cfg.get("ip_location") != "yes":
+                    return  # the user typed a location or turned this off meanwhile
+                moved = self.home() != (round(lat, 4), round(lon, 4))
+                self.cfg.update(home_lat=round(lat, 4), home_lon=round(lon, 4), home_source="ip")
+                save_cfg(self.cfg)
+                if moved:
+                    if hasattr(self, "online_last"):
+                        self.online_last = 0  # re-fetch internet nodes around the new home
+                    self.update_map()
+                    if self.map:
+                        self.map.set_position(round(lat, 4), round(lon, 4))
+            self.root.after(0, apply)
+        threading.Thread(target=work, daemon=True, name="ip-location").start()
+
     def apply_map_style(self):
         base, overlay, max_zoom = MAP_STYLES.get(self.cfg.get("map_style"), MAP_STYLES["Dark"])
         # overlay first: set_tile_server() clears the tile cache and redraws with whatever overlay is set
@@ -5299,8 +5387,13 @@ or 911 if someone is in danger) and to the nearest FAA Flight Standards District
             tk.Entry(win, textvariable=online_radius, width=6, bg=PANEL, fg=FG, insertbackground=FG))
         home = self.home()
         home_txt = tk.StringVar(value=f"{home[0]:.5f}, {home[1]:.5f}" if home else "")
-        row(9, "Home location (lat, lon)\nstays on this PC",
-            tk.Entry(win, textvariable=home_txt, width=24, bg=PANEL, fg=FG, insertbackground=FG))
+        homerow = tk.Frame(win, bg=BG)
+        tk.Entry(homerow, textvariable=home_txt, width=24, bg=PANEL, fg=FG, insertbackground=FG).pack(side="left")
+        ip_loc = tk.BooleanVar(value=self.cfg.get("ip_location") == "yes")
+        tk.Checkbutton(homerow, text="Estimate from internet (IP) when the node has no GPS", variable=ip_loc,
+                       bg=BG, fg=FG, selectcolor=PANEL, activebackground=BG, activeforeground=FG,
+                       font=("Segoe UI", 9)).pack(side="left", padx=(8, 0))
+        row(9, "Home location (lat, lon)\nstays on this PC", homerow)
 
         # Transient-node tracking cadence. All options are 0-hop (local only), so even
         # "Real-time" only touches your own airspace — never the wider mesh.
@@ -5420,13 +5513,25 @@ or 911 if someone is in danger) and to the nearest FAA Flight Standards District
                 if not parts:
                     self.cfg.pop("home_lat", None)
                     self.cfg.pop("home_lon", None)
+                    self.cfg.pop("home_source", None)
                 elif len(parts) == 2 and -90 <= parts[0] <= 90 and -180 <= parts[1] <= 180:
                     if (parts[0], parts[1]) != self.home():
                         self.cfg["home_lat"], self.cfg["home_lon"] = parts
+                        self.cfg["home_source"] = "manual"  # typed by hand: the internet estimate never overrides it
                         if hasattr(self, "online_last"):
                             self.online_last = 0  # re-fetch internet nodes around the new home
             except ValueError:
                 pass
+            want_ip = bool(ip_loc.get())
+            if want_ip != (self.cfg.get("ip_location") == "yes"):
+                self.cfg["ip_location"] = "yes" if want_ip else "no"
+                if want_ip and self.cfg.get("home_source") == "manual" and \
+                        home_txt.get().strip() == (f"{home[0]:.5f}, {home[1]:.5f}" if home else ""):
+                    self.cfg.pop("home_source", None)  # ticked without typing a new spot: let the estimate replace it
+                if want_ip and self.cfg.get("home_source") != "manual":
+                    self.fetch_ip_location()
+            elif want_ip and not self.home():
+                self.fetch_ip_location()  # home cleared with the box ticked: estimate it again
             if map_style.get() != self.cfg.get("map_style", "Dark"):
                 self.cfg["map_style"] = map_style.get()
                 if self.map:

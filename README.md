@@ -193,7 +193,7 @@ how many other nodes it knows.
 
 | Control | How to use it | Status |
 |---|---|---|
-| Pins | **Green**: active nodes. **Grey**: heard before, but not lately. **Purple**: nodes from the internet map (meshmap.net). **Amber outline**: repeaters and routers. **Hollow pin**: a node your radio heard that never sent a location. It's placed in a ring around you so you can still click it; it is *not* its real position. | ✅ |
+| Pins | **Green**: active nodes. **Grey**: heard before, but not lately. **Purple**: nodes from the internet map (meshmap.net). **Amber outline**: repeaters and routers. **Hollow pin**: a node your radio heard that never sent a location. It's placed in a small ring right next to you (within about 150 m) so you can still click it; it is *not* its real position. | ✅ |
 | Click a pin | Opens the node's **info card**: identity, hardware, location, signal and more, with **Copy location**, **Google Maps** and **Message** buttons. | ✅ |
 | Controls bar (above the map) | The toggles and buttons live in a tidy bar across the top of the map, rather than floating on top of it: **Fit all**, the time-range dropdown, and the layer toggles **Internet / Aircraft / Airspace / Names**. | ✅ |
 | **Time range** dropdown | Choose what's on the map: *Nodes currently active* (no grey pins), *active in the last hour*, *…last day*, *…last month*, or *All recorded nodes*. Your choice is remembered. | ✅ |
@@ -210,7 +210,9 @@ how many other nodes it knows.
 ⚠️ **About positions:** a pin is only as accurate as the location that node sends. Many nodes send a
 blurred position on purpose (you'll see a faint circle around them), some send none at all (hollow
 pins), and internet-map positions are often blurred by a kilometre or more. Your own node shows at
-the **home location** from Settings if it has no GPS.
+the **home location** from Settings if it has no GPS. If you allow it, the app can estimate that
+location from your internet connection instead. It asks first, and the estimate is only town-level,
+so it can be a few miles off. Type your exact spot in Settings for a precise pin.
 
 ### Drone tab
 
@@ -306,7 +308,7 @@ message to Everyone.
 | **Map style** | Dark, Street or Satellite. | ✅ |
 | **Online nodes within (km)** | Radius for internet-map nodes around you. | ✅ |
 | **Aircraft: at least (nautical mi)** | How far out to show aircraft (default 50, up to 250). | 🧪 |
-| **Home location** | Where your node sits on the map if it has no GPS. Paste "lat, lon" straight from Google Maps. It stays on your PC and is never sent over the mesh. | ✅ |
+| **Home location** | Where your node sits on the map if it has no GPS. Paste "lat, lon" straight from Google Maps. It stays on your PC and is never sent over the mesh. Tick **Estimate from internet (IP)** to let the app place it from your internet connection instead (one request to ipinfo.io, which sees your public IP; town-level accuracy). A location you type always wins. | ✅ |
 | **Transient tracking** | How often it checks for nodes passing through: Off, Light (3 min, default), Active (1 min) or Real-time (20 s). These checks only reach radios right next to you and are never relayed, so they don't add traffic to the wider mesh. | ✅ |
 | **Keep chat archive** | How long messages are kept (see Chat archive). | 🧪 |
 | **Phone alerts: topic** | Your ntfy topic or link; **New private topic** makes a random one. Blank turns phone alerts off. | 🧪 |
